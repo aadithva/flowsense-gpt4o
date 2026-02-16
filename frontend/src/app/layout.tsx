@@ -1,9 +1,9 @@
 import type { Metadata } from 'next';
 import { Space_Grotesk } from 'next/font/google';
 import './globals.css';
-import { Sidebar } from '@/components/Sidebar';
 import { ThemeProvider } from '@/components/ThemeProvider';
 import { TooltipProvider } from '@/components/ui/tooltip';
+import { AppShell } from '@/components/AppShell';
 
 const spaceGrotesk = Space_Grotesk({ subsets: ['latin'] });
 
@@ -22,12 +22,7 @@ export default function RootLayout({
       <body className={`${spaceGrotesk.className} antialiased`}>
         <ThemeProvider>
           <TooltipProvider>
-            <Sidebar />
-            <main className="ml-64 min-h-screen p-8">
-              <div className="max-w-7xl mx-auto">
-                {children}
-              </div>
-            </main>
+            <AppShell>{children}</AppShell>
           </TooltipProvider>
         </ThemeProvider>
       </body>

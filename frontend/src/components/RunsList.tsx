@@ -16,7 +16,7 @@ export default function RunsList() {
 
     // Poll for updates every 2 seconds if there are processing runs
     const interval = setInterval(() => {
-      if (runs.some(run => run.status === 'processing' || run.status === 'queued')) {
+      if (runs.some(run => run.status === 'processing' || run.status === 'queued' || run.status === 'cancel_requested')) {
         fetchRuns();
       }
     }, 2000);

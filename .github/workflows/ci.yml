@@ -1,0 +1,66 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: read
+  security-events: write
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      APP_BASE_URL: https://example.com
+      AUTH_SESSION_SECRET: 0123456789abcdef0123456789abcdef
+      ENTRA_TENANT_ID: 00000000-0000-0000-0000-000000000000
+      ENTRA_CLIENT_ID: 00000000-0000-0000-0000-000000000000
+      ENTRA_CLIENT_SECRET: dummy-client-secret
+      ENTRA_REDIRECT_PATH: /auth/callback
+      AZURE_SQL_SERVER: example.database.windows.net
+      AZURE_SQL_DATABASE: sqldb-flowsense
+      AZURE_STORAGE_ACCOUNT_NAME: stflowsenseprod
+      AZURE_STORAGE_CONTAINER: videos
+      PROCESSOR_BASE_URL: https://processor.example.com
+      PROCESSOR_WEBHOOK_SECRET: webhook-secret-for-ci-1234567890
+      WEBHOOK_SECRET: webhook-secret-for-ci-1234567890
+      PROCESSOR_WORKER_ID: worker-ci
+      AZURE_OPENAI_ENDPOINT: https://example.openai.azure.com
+      AZURE_OPENAI_API_KEY: dummy-openai-key-value-1234567890
+      AZURE_OPENAI_DEPLOYMENT: gpt-4o-vision
+      AZURE_OPENAI_API_VERSION: 2024-02-15-preview
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint:ci
+
+      - name: Test
+        run: npm run test
+
+      - name: Build
+        run: npm run build
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

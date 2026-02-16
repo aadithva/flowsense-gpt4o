@@ -1,9 +1,20 @@
-import { createClient, createServiceClient } from '@/lib/supabase/server';
+import {
+  createRun,
+  ensureProfile,
+  getFrameCountForRun,
+  getRunSummary,
+  getRunsByUser,
+} from '@/lib/azure/db';
+import { generateUploadSasUrl } from '@/lib/azure/storage';
+import { getAuthenticatedUser, UnauthorizedError, unauthorizedResponse } from '@/lib/auth/require-auth';
 import { createRunSchema } from '@interactive-flow/shared';
 import { NextResponse } from 'next/server';
+import { v4 as uuidv4 } from 'uuid';
 
-const ANON_USER_ID = '00000000-0000-0000-0000-000000000000';
 const ALLOWED_EXTENSIONS = new Set(['mp4', 'mov', 'mkv']);
+const ALLOWED_CONTENT_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/x-matroska', 'video/matroska']);
+const MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024;
+
 const CONTENT_TYPE_EXTENSION_MAP: Record<string, string> = {
   'video/mp4': 'mp4',
   'video/quicktime': 'mov',
@@ -27,24 +38,25 @@ function resolveVideoExtension(fileName?: string, contentType?: string) {
 
 export async function POST(request: Request) {
   try {
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const db = user ? supabase : createServiceClient();
-
-    // Use anonymous user ID if not authenticated (for development)
-    const userId = user?.id || ANON_USER_ID;
+    const user = await getAuthenticatedUser();
+    await ensureProfile(user.oid, user.name ?? user.email ?? null);
 
     const body = await request.json();
     const validation = createRunSchema.safeParse(body);
 
     if (!validation.success) {
+      return NextResponse.json({ error: 'Invalid request', details: validation.error.flatten() }, { status: 400 });
+    }
+
+    const { title, fileName, contentType } = validation.data;
+
+    if (!contentType || !ALLOWED_CONTENT_TYPES.has(contentType)) {
       return NextResponse.json(
-        { error: 'Invalid request', details: validation.error },
+        { error: 'Unsupported video type. Please upload MP4, MOV, or MKV.' },
         { status: 400 }
       );
     }
 
-    const { title, fileName, contentType } = validation.data;
     const extension = resolveVideoExtension(fileName, contentType);
 
     if (!extension) {
@@ -54,145 +66,89 @@ export async function POST(request: Request) {
       );
     }
 
-    // Create analysis run
-    const { data: run, error: insertError } = await db
-      .from('analysis_runs')
-      .insert({
-        user_id: userId,
-        title,
-        video_storage_path: '', // Will be updated after upload
-        status: 'uploaded',
-      })
-      .select()
-      .single();
+    const runId = uuidv4();
+    const videoPath = `${user.oid}/runs/${runId}/video.${extension}`;
 
-    if (insertError) {
-      console.error('Error creating run:', insertError);
-      return NextResponse.json(
-        { error: 'Failed to create analysis run' },
-        { status: 500 }
-      );
-    }
-
-    console.log('[api/runs] Created run', {
-      runId: run.id,
-      userId,
+    const run = await createRun({
+      id: runId,
+      userId: user.oid,
       title,
-      fileName,
-      contentType,
+      videoStoragePath: videoPath,
     });
 
-    // Generate signed upload URL with user ID in path
-    const videoPath = `${userId}/runs/${run.id}/video.${extension}`;
-    const { data: uploadData, error: uploadError } = await db.storage
-      .from('videos')
-      .createSignedUploadUrl(videoPath);
-
-    if (uploadError) {
-      console.error('Error creating upload URL:', uploadError);
-      return NextResponse.json(
-        { error: 'Failed to create upload URL' },
-        { status: 500 }
-      );
+    if (!run) {
+      throw new Error('Run was not created');
     }
 
-    // Update run with video path
-    const { error: updateError } = await db
-      .from('analysis_runs')
-      .update({ video_storage_path: videoPath })
-      .eq('id', run.id);
-
-    if (updateError) {
-      console.error('Error updating run video path:', updateError);
-      return NextResponse.json(
-        { error: 'Failed to update analysis run' },
-        { status: 500 }
-      );
-    }
-
-    console.log('[api/runs] Upload URL issued', {
-      runId: run.id,
-      videoPath,
-    });
+    const uploadUrl = await generateUploadSasUrl(videoPath, 20);
 
     return NextResponse.json({
-      run: { ...run, video_storage_path: videoPath },
-      uploadUrl: uploadData.signedUrl,
-      uploadToken: uploadData.token,
+      run,
+      uploadUrl,
+      uploadConstraints: {
+        maxSizeBytes: MAX_VIDEO_SIZE_BYTES,
+        allowedMimeTypes: Array.from(ALLOWED_CONTENT_TYPES),
+      },
     });
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return unauthorizedResponse();
+    }
+
     console.error('Error in POST /api/runs:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
 export async function GET() {
   try {
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const db = user ? supabase : createServiceClient();
+    const user = await getAuthenticatedUser();
+    const runs = await getRunsByUser(user.oid);
 
-    // Use anonymous user ID if not authenticated (for development)
-    const userId = user?.id || ANON_USER_ID;
-
-    const { data: runs, error } = await db
-      .from('analysis_runs')
-      .select('*')
-      .eq('user_id', userId)
-      .order('created_at', { ascending: false });
-
-    if (error) {
-      console.error('Error fetching runs:', error);
-      return NextResponse.json(
-        { error: 'Failed to fetch runs' },
-        { status: 500 }
-      );
-    }
-
-    // Enrich each run with frame count and overall score
     const enrichedRuns = await Promise.all(
       runs.map(async (run) => {
-        // Get frame count
-        const { count: frameCount } = await db
-          .from('frames')
-          .select('*', { count: 'exact', head: true })
-          .eq('run_id', run.id);
+        const frameCount = await getFrameCountForRun(run.id);
 
-        // Get overall score from summary (only for completed runs)
-        let overallScore;
+        let overallScore: number | undefined;
+        let weightedScore100: number | undefined;
+        let criticalIssueCount: number | undefined;
+        let qualityGateStatus: 'pass' | 'warn' | 'block' | undefined;
+        let metricVersion: string | undefined;
+
         if (run.status === 'completed') {
-          const { data: summary } = await db
-            .from('run_summaries')
-            .select('overall_scores')
-            .eq('run_id', run.id)
-            .single();
+          const summary = await getRunSummary(run.id);
 
           if (summary?.overall_scores) {
-            // Calculate overall score as sum of all categories (7 categories, 0-2 each = max 14)
             overallScore = Object.values(summary.overall_scores).reduce(
               (sum: number, score) => sum + (score as number),
               0
             );
+            weightedScore100 = summary.weighted_score_100;
+            criticalIssueCount = summary.critical_issue_count;
+            qualityGateStatus = summary.quality_gate_status;
+            metricVersion = summary.metric_version;
           }
         }
 
         return {
           ...run,
-          frameCount: frameCount || 0,
+          frameCount,
           overallScore,
+          weighted_score_100: weightedScore100,
+          critical_issue_count: criticalIssueCount,
+          quality_gate_status: qualityGateStatus,
+          metric_version: metricVersion,
         };
       })
     );
 
     return NextResponse.json({ runs: enrichedRuns });
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return unauthorizedResponse();
+    }
+
     console.error('Error in GET /api/runs:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

@@ -38,21 +38,24 @@ export default function UploadZone({
     }
   }, []);
 
-  const validateAndSelect = (file: File) => {
-    const validTypes = ['video/mp4', 'video/quicktime', 'video/x-matroska', 'video/matroska'];
-    if (!validTypes.includes(file.type)) {
-      onError?.('Please upload MP4, MOV, or MKV files only.');
-      return;
-    }
-    if (file.size > 500 * 1024 * 1024) {
-      onError?.('File size must be less than 500MB.');
-      return;
-    }
-    setSelectedFile(file);
-    if (!title) {
-      setTitle(file.name.replace(/\.[^/.]+$/, ''));
-    }
-  };
+  const validateAndSelect = useCallback(
+    (file: File) => {
+      const validTypes = ['video/mp4', 'video/quicktime', 'video/x-matroska', 'video/matroska'];
+      if (!validTypes.includes(file.type)) {
+        onError?.('Please upload MP4, MOV, or MKV files only.');
+        return;
+      }
+      if (file.size > 500 * 1024 * 1024) {
+        onError?.('File size must be less than 500MB.');
+        return;
+      }
+      setSelectedFile(file);
+      if (!title) {
+        setTitle(file.name.replace(/\.[^/.]+$/, ''));
+      }
+    },
+    [onError, title]
+  );
 
   const handleDrop = useCallback(
     (event: React.DragEvent) => {
@@ -65,7 +68,7 @@ export default function UploadZone({
         validateAndSelect(file);
       }
     },
-    [title]
+    [validateAndSelect]
   );
 
   const handleChange = (event: React.ChangeEvent<HTMLInputElement>) => {

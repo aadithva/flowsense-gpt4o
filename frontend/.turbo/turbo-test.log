@@ -1,0 +1,11 @@
+
+> @interactive-flow/web@1.0.0 test
+> vitest run --passWithNoTests
+
+
+ RUN  v2.1.9 /Users/aadith/Documents/Claude workspcae/outputs/microsoft/flowsense/frontend
+
+include: **/*.{test,spec}.?(c|m)[jt]s?(x)
+exclude:  **/node_modules/**, **/dist/**, **/cypress/**, **/.{idea,git,cache,output,temp}/**, **/{karma,rollup,webpack,vite,vitest,jest,ava,babel,nyc,cypress,tsup,build,eslint,prettier}.config.*
+No test files found, exiting with code 0
+

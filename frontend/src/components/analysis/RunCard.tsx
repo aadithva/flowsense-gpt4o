@@ -33,7 +33,9 @@ const STATUS_CONFIG = {
   uploaded: { icon: Clock, color: 'text-muted-foreground', animate: false },
   queued: { icon: Loader2, color: 'text-primary', animate: true },
   processing: { icon: Loader2, color: 'text-primary', animate: true },
+  cancel_requested: { icon: Loader2, color: 'text-yellow-400', animate: true },
   completed: { icon: CheckCircle2, color: 'text-emerald-400', animate: false },
+  cancelled: { icon: AlertCircle, color: 'text-yellow-400', animate: false },
   failed: { icon: AlertCircle, color: 'text-destructive', animate: false },
 };
 
@@ -116,7 +118,8 @@ export default function RunCard({ run, onDelete, onStop }: RunCardProps) {
     }
   };
 
-  const isProcessing = run.status === 'processing' || run.status === 'queued';
+  const isProcessing =
+    run.status === 'processing' || run.status === 'queued' || run.status === 'cancel_requested';
 
   return (
     <Card

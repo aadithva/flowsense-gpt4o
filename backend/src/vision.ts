@@ -1,7 +1,23 @@
+import OpenAI from 'openai';
 import { VISION_MODEL_PROMPT, issueTagSchema, visionAnalysisResponseSchema } from '@interactive-flow/shared';
 
-const OLLAMA_URL = process.env.OLLAMA_URL || 'http://localhost:11434';
-const MODEL = process.env.VISION_MODEL || 'llama3.2-vision:11b';
+// Azure OpenAI Configuration
+import { getEnv } from './env';
+
+const env = getEnv();
+const AZURE_OPENAI_ENDPOINT = env.AZURE_OPENAI_ENDPOINT;
+const AZURE_OPENAI_API_KEY = env.AZURE_OPENAI_API_KEY;
+const AZURE_OPENAI_DEPLOYMENT = env.AZURE_OPENAI_DEPLOYMENT;
+const AZURE_OPENAI_API_VERSION = env.AZURE_OPENAI_API_VERSION;
+
+// Initialize Azure OpenAI client
+const client = new OpenAI({
+  apiKey: AZURE_OPENAI_API_KEY,
+  baseURL: `${AZURE_OPENAI_ENDPOINT}/openai/deployments/${AZURE_OPENAI_DEPLOYMENT}`,
+  defaultQuery: { 'api-version': AZURE_OPENAI_API_VERSION },
+  defaultHeaders: { 'api-key': AZURE_OPENAI_API_KEY },
+});
+
 const DEFAULT_JUSTIFICATION = 'Analysis incomplete - no justification provided';
 const ALLOWED_ISSUE_TAGS = new Set<string>(issueTagSchema.options as string[]);
 
@@ -119,48 +135,49 @@ export async function analyzeFrame(
     : '';
 
   try {
-    console.log(`[Vision] Analyzing frame with Ollama model: ${MODEL}`);
+    console.log(`[Vision] Analyzing frame with Azure OpenAI GPT-4o (deployment: ${AZURE_OPENAI_DEPLOYMENT})`);
 
-    // Call Ollama API
-    const response = await fetch(`${OLLAMA_URL}/api/generate`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      body: JSON.stringify({
-        model: MODEL,
-        prompt: `${VISION_MODEL_PROMPT}${sequenceNote}${priorNote}\n\nImage: [base64 image provided below]\n\nRespond with ONLY the JSON object, no other text.`,
-        images: [base64Image],
-        stream: false,
-        format: 'json',
-        options: {
-          temperature: 0.3,
-          num_predict: 2000,
+    // Call Azure OpenAI API with vision capabilities
+    const response = await client.chat.completions.create({
+      model: AZURE_OPENAI_DEPLOYMENT,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a UX interaction-flow evaluator. Analyze the provided screenshot(s) and respond with ONLY valid JSON, no other text.',
         },
-      }),
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `${VISION_MODEL_PROMPT}${sequenceNote}${priorNote}\n\nAnalyze the image and respond with ONLY the JSON object, no other text.`,
+            },
+            {
+              type: 'image_url',
+              image_url: {
+                url: `data:image/jpeg;base64,${base64Image}`,
+                detail: 'high', // Use high detail for better analysis
+              },
+            },
+          ],
+        },
+      ],
+      max_tokens: 2000,
+      temperature: 0.3,
+      response_format: { type: 'json_object' },
     });
 
-    if (!response.ok) {
-      throw new Error(`Ollama API error: ${response.status} ${response.statusText}`);
-    }
-
-    const data = (await response.json()) as { response?: string };
-    const content = data.response;
+    const content = response.choices[0]?.message?.content;
 
     if (!content) {
-      throw new Error('No response from vision model');
+      throw new Error('No response from Azure OpenAI');
     }
 
     console.log(`[Vision] Raw response length: ${content.length} characters`);
+    console.log(`[Vision] Token usage: ${response.usage?.total_tokens} total (${response.usage?.prompt_tokens} prompt, ${response.usage?.completion_tokens} completion)`);
 
     // Parse and validate JSON response
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (!jsonMatch) {
-      console.error('[Vision] No JSON found in response:', content.substring(0, 500));
-      throw new Error('No JSON found in response');
-    }
-
-    const parsed = JSON.parse(jsonMatch[0]);
+    const parsed = JSON.parse(content);
     const validated = visionAnalysisResponseSchema.safeParse(parsed);
     if (validated.success) {
       return validated.data;

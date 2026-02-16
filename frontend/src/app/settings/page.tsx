@@ -2,6 +2,7 @@ import { Settings, Cpu, Database, Palette } from 'lucide-react';
 import { ThemeSwitcher } from '@/components/ThemeSwitcher';
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card';
 import { Badge } from '@/components/ui/badge';
+import { Button } from '@/components/ui/button';
 
 export default function SettingsPage() {
   return (
@@ -24,7 +25,7 @@ export default function SettingsPage() {
           <CardContent className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Model:</span>
-              <span className="text-foreground font-mono">llama3.2-vision:11b</span>
+              <span className="text-foreground font-mono">gpt-4o-vision</span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Status:</span>
@@ -35,7 +36,7 @@ export default function SettingsPage() {
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Endpoint:</span>
-              <span className="text-foreground font-mono">localhost:11434</span>
+              <span className="text-foreground font-mono">Azure OpenAI</span>
             </div>
           </CardContent>
         </Card>
@@ -50,7 +51,7 @@ export default function SettingsPage() {
           <CardContent className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Provider:</span>
-              <span className="text-foreground">Supabase</span>
+              <span className="text-foreground">Azure SQL + Blob</span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Status:</span>
@@ -89,6 +90,17 @@ export default function SettingsPage() {
           </CardContent>
         </Card>
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle>Session</CardTitle>
+        </CardHeader>
+        <CardContent>
+          <form action="/api/auth/logout" method="post">
+            <Button type="submit" variant="outline">Sign out</Button>
+          </form>
+        </CardContent>
+      </Card>
     </div>
   );
 }

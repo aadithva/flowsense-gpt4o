@@ -64,14 +64,16 @@ export const analysisStatusSchema = z.enum([
   'uploaded',
   'queued',
   'processing',
+  'cancel_requested',
   'completed',
   'failed',
+  'cancelled',
 ]);
 
 export const createRunSchema = z.object({
   title: z.string().min(1).max(255),
-  fileName: z.string().optional(),
-  contentType: z.string().optional(),
+  fileName: z.string().min(1).max(255),
+  contentType: z.string().min(1).max(100),
 });
 
 export const enqueueJobSchema = z.object({

@@ -1,217 +1,175 @@
-import { createClient, createServiceClient } from '@/lib/supabase/server';
+import {
+  deleteRun,
+  getKeyframesWithAnalyses,
+  getPreviousCompletedRunSummaryByTitle,
+  getRunByIdAndUser,
+  getRunSummary,
+  updateRun,
+} from '@/lib/azure/db';
+import { deleteBlob, deleteBlobsInFolder, generateDownloadSasUrl } from '@/lib/azure/storage';
+import { getAuthenticatedUser, UnauthorizedError, unauthorizedResponse } from '@/lib/auth/require-auth';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
-const ANON_USER_ID = '00000000-0000-0000-0000-000000000000';
+const routeParamsSchema = z.object({ id: z.string().uuid() });
+const patchBodySchema = z.object({ action: z.literal('stop') });
+type RouteContext = { params: Promise<{ id: string }> };
+
+function buildDelta(current?: number, previous?: number) {
+  if (typeof current !== 'number' || typeof previous !== 'number') return null;
+  return Number((current - previous).toFixed(2));
+}
 
 export async function GET(
-  request: Request,
-  { params }: { params: { id: string } }
+  _request: Request,
+  { params }: RouteContext
 ) {
   try {
-    const supabase = createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    const db = user ? supabase : createServiceClient();
-    const userId = user?.id || ANON_USER_ID;
-
-    if (authError) {
-      console.warn('[api/runs/:id] Auth error, proceeding as anonymous', authError);
+    const user = await getAuthenticatedUser();
+    const parsedParams = routeParamsSchema.safeParse(await params);
+    if (!parsedParams.success) {
+      return NextResponse.json({ error: 'Invalid run id' }, { status: 400 });
     }
 
-    // Fetch run
-    const { data: run, error: runError } = await db
-      .from('analysis_runs')
-      .select('*')
-      .eq('id', params.id)
-      .eq('user_id', userId)
-      .single();
+    const runId = parsedParams.data.id;
 
-    if (runError || !run) {
+    const run = await getRunByIdAndUser(runId, user.oid);
+    if (!run) {
       return NextResponse.json({ error: 'Run not found' }, { status: 404 });
     }
 
-    // Fetch summary
-    const { data: summary } = await db
-      .from('run_summaries')
-      .select('*')
-      .eq('run_id', params.id)
-      .single();
+    const summary = await getRunSummary(runId);
+    const previousSummary = await getPreviousCompletedRunSummaryByTitle({
+      userId: user.oid,
+      title: run.title,
+      currentRunId: runId,
+    });
 
-    // Fetch keyframes with analyses
-    const { data: frames } = await db
-      .from('frames')
-      .select(`
-        *,
-        analysis:frame_analyses(*)
-      `)
-      .eq('run_id', params.id)
-      .eq('is_keyframe', true)
-      .order('timestamp_ms', { ascending: true });
-
-    // Get signed URLs for frames
+    const frames = await getKeyframesWithAnalyses(runId);
     const framesWithUrls = await Promise.all(
-      (frames || []).map(async (frame) => {
-        const { data: urlData } = await db.storage
-          .from('videos')
-          .createSignedUrl(frame.storage_path, 3600);
-
-        return {
-          ...frame,
-          url: urlData?.signedUrl,
-        };
-      })
+      frames.map(async (frame) => ({
+        ...frame,
+        url: await generateDownloadSasUrl(frame.storage_path, 15),
+      }))
     );
+
+    const regression =
+      summary && previousSummary
+        ? {
+            previous_run_summary: previousSummary,
+            weighted_score_delta: buildDelta(summary.weighted_score_100, previousSummary.weighted_score_100),
+            critical_issue_delta: buildDelta(summary.critical_issue_count, previousSummary.critical_issue_count),
+          }
+        : null;
 
     return NextResponse.json({
       run,
       summary,
       keyframes: framesWithUrls,
+      regression,
     });
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return unauthorizedResponse();
+    }
+
     console.error('Error in GET /api/runs/:id:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
 export async function DELETE(
-  request: Request,
-  { params }: { params: { id: string } }
+  _request: Request,
+  { params }: RouteContext
 ) {
   try {
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const db = user ? supabase : createServiceClient();
-    const userId = user?.id || ANON_USER_ID;
+    const user = await getAuthenticatedUser();
+    const parsedParams = routeParamsSchema.safeParse(await params);
+    if (!parsedParams.success) {
+      return NextResponse.json({ error: 'Invalid run id' }, { status: 400 });
+    }
 
-    // Verify ownership
-    const { data: run, error: runError } = await db
-      .from('analysis_runs')
-      .select('video_storage_path')
-      .eq('id', params.id)
-      .eq('user_id', userId)
-      .single();
+    const runId = parsedParams.data.id;
+    const run = await getRunByIdAndUser(runId, user.oid);
 
-    if (runError || !run) {
+    if (!run) {
       return NextResponse.json({ error: 'Run not found' }, { status: 404 });
     }
 
-    // Delete video and frames from storage
     if (run.video_storage_path) {
       const videoPath = run.video_storage_path;
       const folderPath = videoPath.substring(0, videoPath.lastIndexOf('/'));
 
-      // Delete entire folder (video + frames)
-      const { error: storageError } = await db.storage
-        .from('videos')
-        .remove([videoPath]);
-
-      if (storageError) {
-        console.warn('[api/runs/:id] Storage deletion warning:', storageError);
+      try {
+        await deleteBlob(videoPath);
+      } catch (error) {
+        console.warn('[api/runs/:id] Storage deletion warning:', error);
       }
 
-      // Try to delete frames folder
-      const { data: files } = await db.storage
-        .from('videos')
-        .list(folderPath);
-
-      if (files && files.length > 0) {
-        const filePaths = files.map(f => `${folderPath}/${f.name}`);
-        await db.storage.from('videos').remove(filePaths);
+      try {
+        await deleteBlobsInFolder(`${folderPath}/frames`);
+      } catch (error) {
+        console.warn('[api/runs/:id] Frames deletion warning:', error);
       }
     }
 
-    // Delete run record (cascade handles related tables)
-    const { error: deleteError } = await db
-      .from('analysis_runs')
-      .delete()
-      .eq('id', params.id)
-      .eq('user_id', userId);
-
-    if (deleteError) {
-      console.error('[api/runs/:id] Error deleting run:', deleteError);
-      return NextResponse.json(
-        { error: 'Failed to delete analysis' },
-        { status: 500 }
-      );
-    }
-
-    console.log('[api/runs/:id] Deleted run', { runId: params.id, userId });
+    await deleteRun(runId, user.oid);
 
     return NextResponse.json({ success: true });
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return unauthorizedResponse();
+    }
+
     console.error('Error in DELETE /api/runs/:id:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }
 
 export async function PATCH(
   request: Request,
-  { params }: { params: { id: string } }
+  { params }: RouteContext
 ) {
   try {
-    const supabase = createClient();
-    const { data: { user } } = await supabase.auth.getUser();
-    const db = user ? supabase : createServiceClient();
-    const userId = user?.id || ANON_USER_ID;
-
-    const body = await request.json();
-    const { action } = body;
-
-    if (action === 'stop') {
-      // Verify ownership and check status
-      const { data: run, error: runError } = await db
-        .from('analysis_runs')
-        .select('status')
-        .eq('id', params.id)
-        .eq('user_id', userId)
-        .single();
-
-      if (runError || !run) {
-        return NextResponse.json({ error: 'Run not found' }, { status: 404 });
-      }
-
-      if (run.status !== 'processing' && run.status !== 'queued') {
-        return NextResponse.json(
-          { error: 'Can only stop running or queued analyses' },
-          { status: 400 }
-        );
-      }
-
-      // Update status to failed with stop message
-      const { error: updateError } = await db
-        .from('analysis_runs')
-        .update({
-          status: 'failed',
-          error_message: 'Stopped by user',
-          updated_at: new Date().toISOString(),
-        })
-        .eq('id', params.id)
-        .eq('user_id', userId);
-
-      if (updateError) {
-        console.error('[api/runs/:id] Error stopping run:', updateError);
-        return NextResponse.json(
-          { error: 'Failed to stop analysis' },
-          { status: 500 }
-        );
-      }
-
-      console.log('[api/runs/:id] Stopped run', { runId: params.id, userId });
-
-      return NextResponse.json({ success: true });
+    const user = await getAuthenticatedUser();
+    const parsedParams = routeParamsSchema.safeParse(await params);
+    if (!parsedParams.success) {
+      return NextResponse.json({ error: 'Invalid run id' }, { status: 400 });
     }
 
-    return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+    const runId = parsedParams.data.id;
+    const body = await request.json();
+    const parsedBody = patchBodySchema.safeParse(body);
+    if (!parsedBody.success) {
+      return NextResponse.json({ error: 'Invalid action' }, { status: 400 });
+    }
+
+    const run = await getRunByIdAndUser(runId, user.oid);
+    if (!run) {
+      return NextResponse.json({ error: 'Run not found' }, { status: 404 });
+    }
+
+    if (run.status === 'cancel_requested' || run.status === 'cancelled') {
+      return NextResponse.json({ success: true, status: run.status });
+    }
+
+    if (run.status !== 'processing' && run.status !== 'queued') {
+      return NextResponse.json({ error: 'Can only cancel queued or running analyses' }, { status: 400 });
+    }
+
+    await updateRun(runId, {
+      status: 'cancel_requested',
+      cancel_requested: 1,
+      progress_message: 'Cancellation requested by user',
+    });
+
+    return NextResponse.json({ success: true, status: 'cancel_requested' });
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return unauthorizedResponse();
+    }
+
     console.error('Error in PATCH /api/runs/:id:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

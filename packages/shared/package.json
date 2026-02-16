@@ -2,9 +2,21 @@
   "name": "@interactive-flow/shared",
   "version": "1.0.0",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./src/index.ts",
+  "exports": {
+    ".": {
+      "types": "./src/index.ts",
+      "default": "./dist/index.js"
+    },
+    "./security": {
+      "types": "./src/security.ts",
+      "default": "./dist/security.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --passWithNoTests",
     "dev": "tsc --watch",
     "clean": "rm -rf dist"
   },
@@ -13,6 +25,7 @@
   },
   "devDependencies": {
     "@types/node": "^20.10.6",
-    "typescript": "^5.3.3"
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.9"
   }
 }

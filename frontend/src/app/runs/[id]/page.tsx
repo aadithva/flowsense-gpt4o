@@ -1,11 +1,9 @@
-import { createClient } from '@/lib/supabase/server';
 import ReportView from '@/components/ReportView';
 import Link from 'next/link';
 import { ArrowLeft } from 'lucide-react';
 
-export default async function RunPage({ params }: { params: { id: string } }) {
-  const supabase = createClient();
-  await supabase.auth.getUser();
+export default async function RunPage({ params }: { params: Promise<{ id: string }> }) {
+  const { id } = await params;
 
   return (
     <div className="space-y-6">
@@ -17,7 +15,7 @@ export default async function RunPage({ params }: { params: { id: string } }) {
         Back to History
       </Link>
 
-      <ReportView runId={params.id} />
+      <ReportView runId={id} />
     </div>
   );
 }

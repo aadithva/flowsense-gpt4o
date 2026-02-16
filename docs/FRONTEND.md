@@ -1,36 +1,31 @@
 # Frontend (Next.js)
 
 ## Overview
-The frontend is a Next.js App Router application that provides the upload UI, progress dashboard, and report viewer.
 
-## Location
-- Source: `frontend/src`
-- App routes: `frontend/src/app`
-- Components: `frontend/src/components`
-- Supabase helpers: `frontend/src/lib/supabase`
+`frontend` hosts the app UI and secured API routes.
 
-## Key Routes
-- `/dashboard` - upload form + recent runs
-- `/runs/[id]` - report view + polling
-- `/api/runs` - create run + list runs
-- `/api/runs/[id]` - fetch report data
-- `/api/runs/[id]/enqueue` - queue processing
-- `/api/runs/[id]/status` - polling endpoint
+## Key responsibilities
 
-## Environment
-Create `frontend/.env.local`:
-```
-NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<your-anon-key>
-SUPABASE_SERVICE_ROLE_KEY=<your-service-role-key>
-PROCESSOR_WEBHOOK_SECRET=<your-webhook-secret>
-PROCESSOR_BASE_URL=http://localhost:3001
-```
+- Entra login + signed session cookie
+- middleware route protection for app and `/api/runs*`
+- run lifecycle APIs (create, enqueue, retry, cancel, delete)
+- managed identity Blob SAS generation (user delegation)
+- report UI with metric V2 and regression comparison
 
-## Run Locally
-```
+## Auth flow
+
+1. `/login` -> `/api/auth/login`
+2. Redirect to Entra authorize endpoint
+3. `/auth/callback` exchanges code, verifies ID token, sets session cookie
+4. Middleware enforces authenticated access
+
+## Local run
+
+```bash
 cd frontend
 npm run dev
 ```
 
-The app is available at `http://localhost:3000`.
+## Required env
+
+See `frontend/.env.example`.

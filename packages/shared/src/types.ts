@@ -1,4 +1,11 @@
-export type AnalysisStatus = 'uploaded' | 'queued' | 'processing' | 'completed' | 'failed';
+export type AnalysisStatus =
+  | 'uploaded'
+  | 'queued'
+  | 'processing'
+  | 'cancel_requested'
+  | 'completed'
+  | 'failed'
+  | 'cancelled';
 
 export type IssueSeverity = 'high' | 'med' | 'low';
 
@@ -111,6 +118,11 @@ export interface RunSummary {
   overall_scores: RubricScores;
   top_issues: TopIssue[];
   recommendations: Recommendation[];
+  weighted_score_100: number;
+  critical_issue_count: number;
+  quality_gate_status: 'pass' | 'warn' | 'block';
+  confidence_by_category: Record<keyof RubricScores, number>;
+  metric_version: string;
   created_at: string;
 }
 

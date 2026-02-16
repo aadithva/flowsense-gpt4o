@@ -1,0 +1,14 @@
+
+> @interactive-flow/processor@1.0.0 test
+> vitest run
+
+
+ RUN  v2.1.9 /Users/aadith/Documents/Claude workspcae/outputs/microsoft/flowsense/backend
+
+ ✓ src/summary.test.ts (4 tests) 1ms
+
+ Test Files  1 passed (1)
+      Tests  4 passed (4)
+   Start at  16:19:51
+   Duration  522ms (transform 41ms, setup 0ms, collect 310ms, tests 1ms, environment 0ms, prepare 35ms)
+

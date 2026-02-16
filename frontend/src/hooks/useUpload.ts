@@ -22,6 +22,10 @@ export function useUpload() {
     setState({ loading: false, progress: 0, error: '', run: null });
   }, []);
 
+  const setErrorMessage = useCallback((message: string) => {
+    setState((prev) => ({ ...prev, error: message }));
+  }, []);
+
   const startUpload = useCallback(async (title: string, file: File) => {
     setState({ loading: true, progress: 0, error: '', run: null });
 
@@ -49,6 +53,7 @@ export function useUpload() {
         body: file,
         headers: {
           'Content-Type': file.type || 'application/octet-stream',
+          'x-ms-blob-type': 'BlockBlob', // Required for Azure Blob Storage
         },
       });
 
@@ -81,5 +86,6 @@ export function useUpload() {
     ...state,
     startUpload,
     reset,
+    setErrorMessage,
   };
 }

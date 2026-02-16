@@ -11,11 +11,15 @@
     "dev": "turbo run dev",
     "build": "turbo run build",
     "lint": "turbo run lint",
+    "lint:ci": "turbo run lint --continue -- --max-warnings=0",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
     "clean": "turbo run clean"
   },
   "devDependencies": {
-    "turbo": "^1.11.2",
-    "typescript": "^5.3.3"
+    "turbo": "^1.13.4",
+    "typescript": "^5.3.3",
+    "vitest": "^2.1.9"
   },
   "engines": {
     "node": ">=18.0.0"

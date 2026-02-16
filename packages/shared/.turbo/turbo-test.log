@@ -1,0 +1,14 @@
+
+> @interactive-flow/shared@1.0.0 test
+> vitest run --passWithNoTests
+
+
+ RUN  v2.1.9 /Users/aadith/Documents/Claude workspcae/outputs/microsoft/flowsense/packages/shared
+
+ ✓ src/security.test.ts (2 tests) 1ms
+
+ Test Files  1 passed (1)
+      Tests  2 passed (2)
+   Start at  16:19:50
+   Duration  274ms (transform 50ms, setup 0ms, collect 45ms, tests 1ms, environment 0ms, prepare 42ms)
+

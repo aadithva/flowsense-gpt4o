@@ -1,6 +1,6 @@
 'use client';
 
-import { Activity, Plus, History, Settings, Cpu } from 'lucide-react';
+import { Activity, Plus, History, Settings, Cloud } from 'lucide-react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 import { cn } from '@/lib/utils';
@@ -14,6 +14,10 @@ import {
 
 export function Sidebar() {
   const pathname = usePathname();
+
+  if (pathname === '/login' || pathname.startsWith('/auth')) {
+    return null;
+  }
 
   const navItems = [
     {
@@ -107,16 +111,16 @@ export function Sidebar() {
 
       <Separator />
 
-      {/* Footer - Ollama Status */}
+      {/* Footer - Azure Runtime */}
       <div className="p-4">
         <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-secondary/50">
-          <Cpu className="w-4 h-4 text-muted-foreground" />
+          <Cloud className="w-4 h-4 text-muted-foreground" />
           <div className="flex-1">
             <div className="text-xs font-medium text-zinc-400">
-              Ollama Local
+              Azure Runtime
             </div>
             <div className="text-xs text-muted-foreground">
-              llama3.2-vision
+              Entra + OpenAI
             </div>
           </div>
           <Badge variant="outline" className="h-2 w-2 p-0 rounded-full bg-emerald-500 border-0 animate-pulse" />

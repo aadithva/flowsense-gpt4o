@@ -30,7 +30,7 @@ export function useAnalysisRuns() {
   }, [fetchRuns]);
 
   useEffect(() => {
-    if (!runs.some((run) => run.status === 'processing' || run.status === 'queued')) return;
+    if (!runs.some((run) => run.status === 'processing' || run.status === 'queued' || run.status === 'cancel_requested')) return;
     const interval = setInterval(fetchRuns, 2000);
     return () => clearInterval(interval);
   }, [runs, fetchRuns]);

@@ -1,15 +1,18 @@
 # FlowSense Frontend
 
-Next.js App Router UI for uploads, progress, and reports.
+Next.js app for Entra-authenticated uploads, analysis lifecycle, and report viewing.
 
 ## Setup
-```
+
+```bash
 cp .env.example .env.local
 ```
-Fill in Supabase keys and processor webhook settings.
+
+Populate Entra + Azure + webhook values from `frontend/.env.example`.
 
 ## Run
-```
+
+```bash
 npm run dev
 ```
 

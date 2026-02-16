@@ -1,222 +1,126 @@
-# Quick Start Guide
+# Quick Start (Azure)
 
-Get the FlowSense running locally in 10 minutes.
+This guide starts FlowSense locally against Azure services in ~10 minutes.
 
 ## Prerequisites
 
-- Node.js 18+ installed
-- Docker installed (for Supabase)
-- ffmpeg installed (`brew install ffmpeg` on macOS)
-- OpenAI API key
+- Node.js 20+
+- `ffmpeg` and `ffprobe` on `PATH`
+- Azure resources already provisioned:
+  - Entra app registration
+  - Azure SQL database
+  - Blob storage account + `videos` container
+  - Azure OpenAI deployment
+- Managed identity or local `az login` access that can:
+  - read/write blobs in `videos`
+  - connect to Azure SQL via Entra token auth
 
-## Step 1: Install Dependencies (2 min)
+## 1. Install dependencies
 
 ```bash
 npm install
 ```
 
-## Step 2: Start Supabase (3 min)
+## 2. Configure environment files
 
 ```bash
-# Install Supabase CLI (if not installed)
-npm install -g supabase
-
-# Start Supabase (takes ~2 min first time)
-cd supabase
-supabase start
+cp frontend/.env.example frontend/.env.local
+cp backend/.env.example backend/.env
 ```
 
-**Important**: Copy the output! You'll need:
-- `API URL` (usually http://127.0.0.1:54321)
-- `anon key`
-- `service_role key`
+Update values in both files, especially:
 
-## Step 3: Create Storage Bucket (1 min)
+- `AUTH_SESSION_SECRET`
+- `ENTRA_TENANT_ID`
+- `ENTRA_CLIENT_ID`
+- `ENTRA_CLIENT_SECRET`
+- `APP_BASE_URL`
+- `PROCESSOR_BASE_URL`
+- `PROCESSOR_WEBHOOK_SECRET` and `WEBHOOK_SECRET` (must match)
+- `AZURE_SQL_SERVER`
+- `AZURE_SQL_DATABASE`
+- `AZURE_STORAGE_ACCOUNT_NAME`
+- `AZURE_OPENAI_*`
 
-1. Open Supabase Studio: http://127.0.0.1:54323
-2. Go to **Storage**
-3. Click **New bucket**
-4. Name: `videos`
-5. Make it **Private**
-6. Click **Create bucket**
+Do not set these deprecated shared-key variables:
 
-## Step 4: Configure Environment (2 min)
+- `AZURE_STORAGE_ACCOUNT_KEY`
+- `AZURE_STORAGE_CONNECTION_STRING`
 
-**Web App**: Create `frontend/.env.local`
-```env
-NEXT_PUBLIC_SUPABASE_URL=http://127.0.0.1:54321
-NEXT_PUBLIC_SUPABASE_ANON_KEY=<paste-anon-key>
-SUPABASE_SERVICE_ROLE_KEY=<paste-service-role-key>
-PROCESSOR_WEBHOOK_SECRET=local-dev-secret
-PROCESSOR_BASE_URL=http://localhost:3001
-```
+App startup intentionally fails if they are present.
 
-**Processor**: Create `backend/.env`
-```env
-SUPABASE_URL=http://127.0.0.1:54321
-SUPABASE_SERVICE_ROLE_KEY=<paste-service-role-key>
-OPENAI_API_KEY=<your-openai-api-key>
-OPENAI_MODEL=gpt-4-vision-preview
-WEBHOOK_SECRET=local-dev-secret
-PORT=3001
-```
+## 3. Apply SQL migrations
 
-## Step 5: Build Shared Package (1 min)
+Apply in order:
+
+1. `azure/migrations/001_initial_schema.sql`
+2. `azure/migrations/002_hardening_and_metrics_v2.sql`
+
+## 4. Start apps
+
+Open two terminals:
 
 ```bash
-npm run build --workspace=@interactive-flow/shared
+# terminal 1
+cd frontend && npm run dev
 ```
 
-## Step 6: Start Development Servers (1 min)
-
-Open **two terminals**:
-
-**Terminal 1 - Web App:**
 ```bash
-cd frontend
-npm run dev
+# terminal 2
+cd backend && npm run dev
 ```
 
-**Terminal 2 - Processor:**
+## 5. Verify the app
+
+1. Open `http://localhost:3000`
+2. Sign in with Microsoft Entra
+3. Create a run and upload a video
+4. Queue processing
+5. Open run report and confirm Metric V2 fields appear:
+   - `weighted_score_100`
+   - `critical_issue_count`
+   - `quality_gate_status`
+   - `confidence_by_category`
+
+## 6. Run quality gates
+
 ```bash
-cd backend
-npm run dev
+npm run typecheck
+npm run lint:ci
+npm run test
+npm run build
+npm audit --omit=dev --audit-level=high
 ```
-
-## Step 7: Test It Out! 🎉
-
-1. Open http://localhost:3000
-2. Click "Send Magic Link" (check http://127.0.0.1:54324 for email)
-3. Upload a short screen recording
-4. Wait 2-5 minutes for processing
-5. View your analysis report!
 
 ## Troubleshooting
 
-### "Supabase command not found"
+### Login fails or callback errors
 
-```bash
-npm install -g supabase
-```
+- Verify Entra redirect URI is `${APP_BASE_URL}/auth/callback`
+- Confirm tenant/client IDs match the app registration
+- Confirm `AUTH_SESSION_SECRET` is set and stable
 
-### "ffmpeg not found"
+### Upload fails
 
-```bash
-# macOS
-brew install ffmpeg
+- Confirm blob container exists (`videos`)
+- Confirm MIME type is allowed (`mp4`, `mov`, `mkv`)
+- Confirm file size is <= 500MB
+- Confirm managed identity permissions include blob data contributor access
 
-# Ubuntu/Debian
-sudo apt-get install ffmpeg
+### Runs remain queued
 
-# Windows
-# Download from https://ffmpeg.org/download.html
-```
+- Check processor logs for webhook auth or SQL claim errors
+- Confirm `PROCESSOR_BASE_URL` is reachable from frontend
+- Confirm webhook secrets match exactly
 
-### "Cannot connect to Supabase"
+### Build/test differences between local and CI
 
-Check Supabase is running:
-```bash
-cd supabase
-supabase status
-```
+- Run `npm run lint:ci` locally (CI uses zero-warning lint)
+- Ensure Azure env variables are set for both frontend/backend commands
 
-If not running:
-```bash
-supabase start
-```
+## Related docs
 
-### "Storage bucket not found"
-
-1. Go to http://127.0.0.1:54323
-2. Storage > Create bucket named `videos` (private)
-
-### "OpenAI API error"
-
-- Verify your API key is correct
-- Check you have GPT-4 Vision access
-- Ensure you have API credits
-
-### Video upload fails
-
-1. Check `videos` bucket exists in Supabase Storage
-2. Verify file is under 500MB
-3. Check browser console for errors
-
-### Processing never completes
-
-1. Check processor terminal for errors
-2. Verify OpenAI API key works
-3. Check Supabase connection
-4. Look at `analysis_runs` table status
-
-## Next Steps
-
-- Read [README.md](README.md) for full documentation
-- Check [DEPLOYMENT.md](DEPLOYMENT.md) for production deployment
-- Review [VISION_PROMPT.md](VISION_PROMPT.md) to customize analysis
-
-## Sample Video
-
-For testing, record a 10-30 second screen video of:
-- Opening an app
-- Clicking through a workflow
-- Completing a simple task
-
-Keep it short for faster processing!
-
-## Development Tips
-
-### View Database
-
-Supabase Studio: http://127.0.0.1:54323
-
-- **Table Editor**: View/edit data
-- **SQL Editor**: Run queries
-- **Logs**: Check errors
-
-### Monitor Processing
-
-Watch processor terminal for real-time logs:
-```
-Starting processing for run abc123
-Extracting frames for run abc123
-Extracted 24 frames, 8 keyframes
-Analyzing keyframes for run abc123
-Generating summary for run abc123
-Successfully completed processing for run abc123
-```
-
-### API Testing
-
-Test endpoints with curl:
-
-```bash
-# Health check
-curl http://localhost:3001/health
-
-# List runs (need auth token)
-curl http://localhost:3000/api/runs \
-  -H "Cookie: sb-xxx=<your-cookie>"
-```
-
-### Hot Reload
-
-Both apps support hot reload:
-- **Web**: Changes auto-refresh browser
-- **Processor**: Uses `tsx watch` for instant reload
-
-## Common Development Workflow
-
-1. **Make code changes**
-2. **Test in browser** (web hot reloads)
-3. **Upload test video**
-4. **Monitor processor logs**
-5. **View results**
-6. **Iterate**
-
-## Need Help?
-
-- Check [README.md](README.md) for detailed docs
-- Review error messages in terminal
-- Check Supabase logs at http://127.0.0.1:54323
-- Open GitHub issue for bugs
+- `README.md`
+- `docs/DEPLOYMENT.md`
+- `docs/SECURITY_POLICY.md`
+- `docs/ARCHITECTURE.md`

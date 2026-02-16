@@ -1,8 +1,9 @@
+# FlowSense Backend Processor - Azure Container Apps
 FROM node:20-slim
 
-# Install ffmpeg
+# Install ffmpeg and curl for health checks
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg curl && \
     rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -19,13 +20,19 @@ RUN npm install
 COPY backend ./backend
 COPY packages/shared ./packages/shared
 
-# Build
+# Build shared package and backend
 RUN npm run build --workspace=@interactive-flow/shared
 RUN npm run build --workspace=@interactive-flow/processor
 
-# Create temp directory
+# Create temp directory for video processing
 RUN mkdir -p /app/backend/temp
 
-EXPOSE 3001
+# Expose processor port
+EXPOSE 3002
 
+# Health check for Azure Container Apps
+HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
+  CMD curl -f http://localhost:3002/health || exit 1
+
+# Start the processor
 CMD ["npm", "start", "--workspace=@interactive-flow/processor"]

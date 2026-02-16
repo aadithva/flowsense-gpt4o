@@ -18,6 +18,16 @@ export const FRAME_EXTRACTION_FPS = 2;
 export const KEYFRAME_DIFF_THRESHOLD = 0.15; // 15% pixel difference
 export const MIN_KEYFRAME_DISTANCE_MS = 500; // minimum 500ms between keyframes
 
+export const RUBRIC_WEIGHTS: Record<keyof typeof RUBRIC_CATEGORIES, number> = {
+  cat1: 20,
+  cat2: 15,
+  cat3: 15,
+  cat4: 15,
+  cat5: 20,
+  cat6: 5,
+  cat7: 10,
+};
+
 export const VISION_MODEL_PROMPT = `You are a UX interaction-flow evaluator. You will be given a SEQUENCE of consecutive frames from a screen recording, arranged left-to-right (oldest to newest).
 
 Your job is to analyze the INTERACTION visible across these frames and score the interaction quality using a detailed rubric.

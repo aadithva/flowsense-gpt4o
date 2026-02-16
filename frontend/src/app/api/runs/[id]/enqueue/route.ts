@@ -1,137 +1,80 @@
-import { createClient, createServiceClient } from '@/lib/supabase/server';
+import { getRunByIdAndUser, updateRun } from '@/lib/azure/db';
+import { getBlobInfo } from '@/lib/azure/storage';
+import { getAuthenticatedUser, UnauthorizedError, unauthorizedResponse } from '@/lib/auth/require-auth';
+import { notifyProcessor } from '@/lib/security/webhook';
 import { NextResponse } from 'next/server';
+import { z } from 'zod';
 
-const ANON_USER_ID = '00000000-0000-0000-0000-000000000000';
+const routeParamsSchema = z.object({ id: z.string().uuid() });
+const MAX_VIDEO_SIZE_BYTES = 500 * 1024 * 1024;
+const ALLOWED_CONTENT_TYPES = new Set(['video/mp4', 'video/quicktime', 'video/x-matroska', 'video/matroska']);
+type RouteContext = { params: Promise<{ id: string }> };
 
 export async function POST(
-  request: Request,
-  { params }: { params: { id: string } }
+  _request: Request,
+  { params }: RouteContext
 ) {
   try {
-    const supabase = createClient();
-    const { data: { user }, error: authError } = await supabase.auth.getUser();
-    const db = user ? supabase : createServiceClient();
-    const userId = user?.id || ANON_USER_ID;
-
-    if (authError) {
-      console.warn('[api/runs/enqueue] Auth error, proceeding as anonymous', authError);
+    const user = await getAuthenticatedUser();
+    const parsedParams = routeParamsSchema.safeParse(await params);
+    if (!parsedParams.success) {
+      return NextResponse.json({ error: 'Invalid run id' }, { status: 400 });
     }
 
-    // Verify run ownership
-    const { data: run, error: runError } = await db
-      .from('analysis_runs')
-      .select('*')
-      .eq('id', params.id)
-      .eq('user_id', userId)
-      .single();
+    const runId = parsedParams.data.id;
+    const run = await getRunByIdAndUser(runId, user.oid);
 
-    if (runError || !run) {
+    if (!run) {
       return NextResponse.json({ error: 'Run not found' }, { status: 404 });
     }
 
+    if (run.status === 'queued' || run.status === 'processing') {
+      return NextResponse.json({ success: true, status: run.status });
+    }
+
     if (run.status !== 'uploaded') {
-      return NextResponse.json(
-        { error: 'Run already queued or processing' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Run must be uploaded before queueing' }, { status: 400 });
     }
 
     if (!run.video_storage_path) {
-      return NextResponse.json(
-        { error: 'Video path missing for run' },
-        { status: 400 }
-      );
+      return NextResponse.json({ error: 'Video path missing for run' }, { status: 400 });
     }
 
-    const pathParts = run.video_storage_path.split('/');
-    const fileName = pathParts.pop();
-    const folderPath = pathParts.join('/');
+    const blobInfo = await getBlobInfo(run.video_storage_path);
 
-    if (!fileName) {
-      return NextResponse.json(
-        { error: 'Video path is invalid' },
-        { status: 400 }
-      );
+    if (!blobInfo.exists || blobInfo.size <= 0) {
+      return NextResponse.json({ error: 'Uploaded video not found or empty' }, { status: 400 });
     }
 
-    const { data: files, error: listError } = await db.storage
-      .from('videos')
-      .list(folderPath, { search: fileName, limit: 10 });
-
-    if (listError) {
-      console.error('Error verifying uploaded video:', listError);
-      return NextResponse.json(
-        { error: 'Failed to verify uploaded video' },
-        { status: 500 }
-      );
+    if (blobInfo.size > MAX_VIDEO_SIZE_BYTES) {
+      return NextResponse.json({ error: 'Uploaded video exceeds the 500MB limit' }, { status: 400 });
     }
 
-    const uploadedFile = files?.find((file) => file.name === fileName);
-    const uploadedSize =
-      uploadedFile?.metadata?.size ?? (uploadedFile as { size?: number } | undefined)?.size;
-
-    if (!uploadedFile || !uploadedSize || uploadedSize <= 0) {
-      return NextResponse.json(
-        { error: 'Uploaded video not found or empty' },
-        { status: 400 }
-      );
+    if (!blobInfo.contentType || !ALLOWED_CONTENT_TYPES.has(blobInfo.contentType)) {
+      return NextResponse.json({ error: 'Unsupported uploaded video format' }, { status: 400 });
     }
 
-    console.log('[api/runs/enqueue] Upload verified', {
-      runId: run.id,
-      videoPath: run.video_storage_path,
-      sizeBytes: uploadedSize,
+    await updateRun(runId, {
+      status: 'queued',
+      progress_percentage: 0,
+      progress_message: 'Queued for processing',
+      cancel_requested: 0,
+      error_message: null,
     });
 
-    // Update status to queued
-    const { error: updateError } = await db
-      .from('analysis_runs')
-      .update({
-        status: 'queued',
-        progress_percentage: 0,
-        progress_message: 'Queued for processing',
-      })
-      .eq('id', params.id);
-
-    if (updateError) {
-      return NextResponse.json(
-        { error: 'Failed to queue run' },
-        { status: 500 }
-      );
+    try {
+      await notifyProcessor(runId);
+    } catch (error) {
+      console.error('[api/runs/enqueue] Failed to notify processor:', error);
     }
 
-    console.log('[api/runs/enqueue] Run queued', {
-      runId: run.id,
-      userId,
-    });
-
-    // Trigger processor via webhook
-    const processorUrl = process.env.PROCESSOR_BASE_URL;
-    const webhookSecret = process.env.PROCESSOR_WEBHOOK_SECRET;
-
-    if (processorUrl && webhookSecret) {
-      try {
-        await fetch(`${processorUrl}/process`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Webhook-Secret': webhookSecret,
-          },
-          body: JSON.stringify({ run_id: params.id }),
-        });
-      } catch (error) {
-        console.error('Failed to notify processor:', error);
-        // Don't fail the request if processor notification fails
-        // The processor can poll for queued jobs instead
-      }
-    }
-
-    return NextResponse.json({ success: true });
+    return NextResponse.json({ success: true, status: 'queued' });
   } catch (error) {
+    if (error instanceof UnauthorizedError) {
+      return unauthorizedResponse();
+    }
+
     console.error('Error in POST /api/runs/:id/enqueue:', error);
-    return NextResponse.json(
-      { error: 'Internal server error' },
-      { status: 500 }
-    );
+    return NextResponse.json({ error: 'Internal server error' }, { status: 500 });
   }
 }

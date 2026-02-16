@@ -8,7 +8,7 @@ export default function Home() {
           Analyze UX Flows with AI
         </h1>
         <p className="text-zinc-400 text-lg">
-          Upload a screen recording and get instant UX insights using local AI
+          Upload a screen recording and get secure, rubric-based UX insights on Azure
         </p>
       </div>
 
@@ -19,15 +19,15 @@ export default function Home() {
       <div className="flex items-center justify-center gap-6 text-xs text-zinc-600">
         <span className="flex items-center gap-1.5">
           <div className="w-1.5 h-1.5 rounded-full bg-green-500" />
-          100% Local
+          Entra Protected
         </span>
         <span className="flex items-center gap-1.5">
           <div className="w-1.5 h-1.5 rounded-full bg-cyan-500" />
-          No cloud costs
+          Azure OpenAI
         </span>
         <span className="flex items-center gap-1.5">
           <div className="w-1.5 h-1.5 rounded-full bg-zinc-500" />
-          Private
+          Managed Identity
         </span>
       </div>
     </div>

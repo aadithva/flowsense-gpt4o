@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { RUBRIC_CATEGORIES, SCORE_LABELS } from '@interactive-flow/shared';
 import {
   PolarAngleAxis,
@@ -27,7 +27,22 @@ interface ReportData {
   run: RunWithSummary;
   summary?: RunSummary;
   keyframes: FrameWithAnalysis[];
+  regression?: {
+    previous_run_summary: RunSummary;
+    weighted_score_delta: number | null;
+    critical_issue_delta: number | null;
+  } | null;
 }
+
+const PROCESSING_STEPS = [
+  { label: 'Action → Response Integrity', detail: 'Checking clarity of system response' },
+  { label: 'Feedback & System Status', detail: 'Scanning for visibility of state changes' },
+  { label: 'Interaction Predictability', detail: 'Assessing affordance and intent cues' },
+  { label: 'Flow Continuity', detail: 'Looking for friction or backtracking' },
+  { label: 'Error Handling', detail: 'Inspecting recovery paths and messaging' },
+  { label: 'Micro-interactions', detail: 'Reviewing polish and transitions' },
+  { label: 'Efficiency', detail: 'Evaluating steps and interaction cost' },
+] as const;
 
 export default function ReportView({ runId }: { runId: string }) {
   const [data, setData] = useState<ReportData | null>(null);
@@ -40,40 +55,9 @@ export default function ReportView({ runId }: { runId: string }) {
   const [exportingPdf, setExportingPdf] = useState(false);
   const [exportError, setExportError] = useState<string>('');
   const reportRef = useRef<HTMLDivElement | null>(null);
+  const runStatus = data?.run.status;
 
-  const processingSteps = [
-    { label: 'Action → Response Integrity', detail: 'Checking clarity of system response' },
-    { label: 'Feedback & System Status', detail: 'Scanning for visibility of state changes' },
-    { label: 'Interaction Predictability', detail: 'Assessing affordance and intent cues' },
-    { label: 'Flow Continuity', detail: 'Looking for friction or backtracking' },
-    { label: 'Error Handling', detail: 'Inspecting recovery paths and messaging' },
-    { label: 'Micro-interactions', detail: 'Reviewing polish and transitions' },
-    { label: 'Efficiency', detail: 'Evaluating steps and interaction cost' },
-  ];
-
-  useEffect(() => {
-    fetchData();
-  }, [runId]);
-
-  useEffect(() => {
-    if (!data) return;
-    if (data.run.status === 'processing' || data.run.status === 'queued') {
-      const interval = setInterval(() => fetchStatus(), 3000);
-      return () => clearInterval(interval);
-    }
-  }, [data?.run.status, runId]);
-
-  useEffect(() => {
-    if (!data) return;
-    if (data.run.status === 'processing' || data.run.status === 'queued') {
-      const interval = setInterval(() => {
-        setActiveStep((prev) => (prev + 1) % processingSteps.length);
-      }, 1800);
-      return () => clearInterval(interval);
-    }
-  }, [data?.run.status, processingSteps.length]);
-
-  const fetchData = async () => {
+  const fetchData = useCallback(async () => {
     try {
       setError('');
       const res = await fetch(`/api/runs/${runId}`);
@@ -89,20 +73,40 @@ export default function ReportView({ runId }: { runId: string }) {
     } finally {
       setLoading(false);
     }
-  };
+  }, [runId]);
 
-  const fetchStatus = async () => {
+  const fetchStatus = useCallback(async () => {
     try {
       const res = await fetch(`/api/runs/${runId}/status`);
       if (!res.ok) return;
       const status = await res.json();
-      if (status.status === 'completed' || status.status === 'failed') {
+      if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
         fetchData();
       }
     } catch (error) {
       console.error('Failed to fetch status:', error);
     }
-  };
+  }, [fetchData, runId]);
+
+  useEffect(() => {
+    fetchData();
+  }, [fetchData]);
+
+  useEffect(() => {
+    if (runStatus === 'processing' || runStatus === 'queued') {
+      const interval = setInterval(() => fetchStatus(), 3000);
+      return () => clearInterval(interval);
+    }
+  }, [fetchStatus, runStatus]);
+
+  useEffect(() => {
+    if (runStatus === 'processing' || runStatus === 'queued') {
+      const interval = setInterval(() => {
+        setActiveStep((prev) => (prev + 1) % PROCESSING_STEPS.length);
+      }, 1800);
+      return () => clearInterval(interval);
+    }
+  }, [runStatus]);
 
   const handleRetry = async () => {
     try {
@@ -188,13 +192,13 @@ export default function ReportView({ runId }: { runId: string }) {
     return <div className="py-8 text-center text-muted-foreground">Analysis not found</div>;
   }
 
-  const { run, summary, keyframes } = data;
+  const { run, summary, keyframes, regression } = data;
 
-  if (run.status === 'failed') {
+  if (run.status === 'failed' || run.status === 'cancelled') {
     return (
       <Alert variant="destructive">
         <div className="flex items-center justify-between">
-          <AlertTitle>Analysis Failed</AlertTitle>
+          <AlertTitle>{run.status === 'cancelled' ? 'Analysis Cancelled' : 'Analysis Failed'}</AlertTitle>
           <Button
             onClick={handleRetry}
             disabled={retrying}
@@ -219,7 +223,11 @@ export default function ReportView({ runId }: { runId: string }) {
           <h2 className="text-xl font-semibold text-foreground">{run.title}</h2>
           <div className="inline-flex items-center gap-2 text-xs font-mono">
             <Badge variant="outline" className="border-primary/30 bg-primary/10 text-primary">
-              {run.status === 'queued' ? 'Queued' : 'Processing'}
+              {run.status === 'queued'
+                ? 'Queued'
+                : run.status === 'cancel_requested'
+                ? 'Cancel Requested'
+                : 'Processing'}
             </Badge>
             <span className="text-muted-foreground">{progress}%</span>
           </div>
@@ -228,7 +236,7 @@ export default function ReportView({ runId }: { runId: string }) {
         <div className="relative mt-5 inline-flex">
           <div className="absolute inset-x-0 -bottom-1 h-6 bg-gradient-to-r from-primary/0 via-primary/20 to-primary/0 blur-sm" />
           <p className="relative text-sm text-zinc-200">
-            {processingSteps[activeStep]?.label}: {processingSteps[activeStep]?.detail}
+            {PROCESSING_STEPS[activeStep]?.label}: {PROCESSING_STEPS[activeStep]?.detail}
           </p>
         </div>
 
@@ -282,6 +290,7 @@ export default function ReportView({ runId }: { runId: string }) {
       {retryError && <p className="text-sm text-destructive">{retryError}</p>}
       {exportError && <p className="text-sm text-destructive">{exportError}</p>}
 
+      <MetricHighlights summary={summary} regression={regression} />
       <OverallScores summary={summary} />
       <TimelineStrip keyframes={keyframes} selectedFrame={selectedFrame} onSelectFrame={setSelectedFrame} />
       {currentFrame && <FrameDetail frame={currentFrame} />}
@@ -335,6 +344,82 @@ function OverallScores({ summary }: { summary: RunSummary }) {
           })}
         </div>
       </div>
+    </Card>
+  );
+}
+
+function MetricHighlights({
+  summary,
+  regression,
+}: {
+  summary: RunSummary;
+  regression?: ReportData['regression'];
+}) {
+  const gateClass =
+    summary.quality_gate_status === 'pass'
+      ? 'bg-emerald-500/20 text-emerald-300'
+      : summary.quality_gate_status === 'warn'
+      ? 'bg-yellow-500/20 text-yellow-300'
+      : 'bg-red-500/20 text-red-300';
+
+  return (
+    <Card className="p-6">
+      <div className="flex flex-wrap items-center gap-3">
+        <Badge className={gateClass}>Quality Gate: {summary.quality_gate_status.toUpperCase()}</Badge>
+        <Badge variant="outline">Metric Version: {summary.metric_version}</Badge>
+      </div>
+
+      <div className="mt-4 grid grid-cols-1 gap-3 md:grid-cols-3">
+        <Card className="p-4">
+          <div className="text-xs text-muted-foreground">Weighted Score</div>
+          <div className="mt-1 text-2xl font-bold text-foreground">{summary.weighted_score_100.toFixed(1)}/100</div>
+        </Card>
+        <Card className="p-4">
+          <div className="text-xs text-muted-foreground">Critical Issues</div>
+          <div className="mt-1 text-2xl font-bold text-foreground">{summary.critical_issue_count}</div>
+        </Card>
+        <Card className="p-4">
+          <div className="text-xs text-muted-foreground">Average Confidence</div>
+          <div className="mt-1 text-2xl font-bold text-foreground">
+            {(
+              Object.values(summary.confidence_by_category).reduce((sum, value) => sum + value, 0) /
+              Object.values(summary.confidence_by_category).length
+            ).toFixed(2)}
+          </div>
+        </Card>
+      </div>
+
+      {regression?.previous_run_summary && (
+        <div className="mt-4 rounded-lg border border-border/70 bg-secondary/30 p-4 text-sm text-zinc-300">
+          <div className="font-medium text-foreground">Regression View</div>
+          <div className="mt-2">
+            Weighted score delta:{' '}
+            <span
+              className={cn(
+                'font-semibold',
+                (regression.weighted_score_delta ?? 0) >= 0 ? 'text-emerald-300' : 'text-red-300'
+              )}
+            >
+              {regression.weighted_score_delta === null
+                ? 'N/A'
+                : `${regression.weighted_score_delta > 0 ? '+' : ''}${regression.weighted_score_delta.toFixed(2)}`}
+            </span>
+          </div>
+          <div>
+            Critical issue delta:{' '}
+            <span
+              className={cn(
+                'font-semibold',
+                (regression.critical_issue_delta ?? 0) <= 0 ? 'text-emerald-300' : 'text-red-300'
+              )}
+            >
+              {regression.critical_issue_delta === null
+                ? 'N/A'
+                : `${regression.critical_issue_delta > 0 ? '+' : ''}${regression.critical_issue_delta.toFixed(0)}`}
+            </span>
+          </div>
+        </div>
+      )}
     </Card>
   );
 }

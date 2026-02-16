@@ -1,30 +1,21 @@
-import { supabase } from './supabase';
+import { claimNextQueuedRun } from './azure-db';
 import { processRun } from './processor';
+import { getEnv } from './env';
 
 const POLL_INTERVAL = 5000; // 5 seconds
 let isPolling = false;
 
 export function pollForJobs() {
+  const env = getEnv();
   setInterval(async () => {
     if (isPolling) return;
 
     isPolling = true;
     try {
-      const { data: runs, error } = await supabase
-        .from('analysis_runs')
-        .select('id')
-        .eq('status', 'queued')
-        .order('created_at', { ascending: true })
-        .limit(1);
+      const runId = await claimNextQueuedRun(env.PROCESSOR_WORKER_ID);
 
-      if (error) {
-        console.error('Error polling for jobs:', error);
-        return;
-      }
-
-      if (runs && runs.length > 0) {
-        const runId = runs[0].id;
-        console.log(`Processing queued run: ${runId}`);
+      if (runId) {
+        console.log(`[Poller] Claimed queued run: ${runId}`);
         await processRun(runId);
       }
     } catch (error) {

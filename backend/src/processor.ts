@@ -1,20 +1,33 @@
-import { supabase } from './supabase';
-import { extractFrames } from './ffmpeg';
+import {
+  getRunById,
+  updateRunStatus,
+  insertFrame,
+  insertFrameAnalysis,
+  insertRunSummary,
+  isRunCancellationRequested,
+} from './azure-db';
+import { downloadBlob, uploadBlob } from './azure-storage';
+import { extractFrames, validateVideoBuffer } from './ffmpeg';
 import { analyzeFrame } from './vision';
 import { generateSummary } from './summary';
-import type { AnalysisRun } from '@interactive-flow/shared';
 import sharp from 'sharp';
+import { trackEvent, trackException, trackMetric } from './telemetry';
 
-const ANON_USER_ID = '00000000-0000-0000-0000-000000000000';
+class RunCancelledError extends Error {
+  constructor(message = 'Run cancellation requested') {
+    super(message);
+    this.name = 'RunCancelledError';
+  }
+}
 
 async function updateProgress(runId: string, percentage: number, message: string) {
-  await supabase
-    .from('analysis_runs')
-    .update({
-      progress_percentage: percentage,
-      progress_message: message
-    })
-    .eq('id', runId);
+  await updateRunStatus(runId, 'processing', { percentage, message });
+}
+
+async function throwIfCancelled(runId: string) {
+  if (await isRunCancellationRequested(runId)) {
+    throw new RunCancelledError();
+  }
 }
 
 function summarizeAnalysis(
@@ -28,16 +41,13 @@ function summarizeAnalysis(
 ) {
   const time = `t=${timestampMs}ms`;
   const topIssues = (analysis.issue_tags || []).slice(0, 3);
-
-  // Use cat1 (Action→Response Integrity) as the primary justification for context
   const primaryJustification = analysis.justifications?.cat1 || '';
 
-  // Build a more narrative summary
   if (topIssues.length > 0) {
     return `${time}: ${primaryJustification}. Issues: ${topIssues.join(', ')}`;
-  } else {
-    return `${time}: ${primaryJustification}. No critical issues.`;
   }
+
+  return `${time}: ${primaryJustification}. No critical issues.`;
 }
 
 async function buildFrameStrip(buffers: Buffer[], targetHeight = 360) {
@@ -47,10 +57,7 @@ async function buildFrameStrip(buffers: Buffer[], targetHeight = 360) {
 
   const resized = await Promise.all(
     buffers.map((buffer) =>
-      sharp(buffer)
-        .resize({ height: targetHeight })
-        .jpeg({ quality: 85 })
-        .toBuffer({ resolveWithObject: true })
+      sharp(buffer).resize({ height: targetHeight }).jpeg({ quality: 85 }).toBuffer({ resolveWithObject: true })
     )
   );
 
@@ -90,141 +97,151 @@ async function buildFrameStrip(buffers: Buffer[], targetHeight = 360) {
 }
 
 export async function processRun(runId: string) {
+  const startedAt = Date.now();
   console.log(`\n${'='.repeat(60)}`);
   console.log(`[Processor] Starting processing for run: ${runId}`);
   console.log(`${'='.repeat(60)}\n`);
 
   try {
-    // Update status to processing
-    console.log('[Step 1/6] Updating status to processing...');
-    await supabase
-      .from('analysis_runs')
-      .update({ status: 'processing', progress_percentage: 0, progress_message: 'Starting analysis...' })
-      .eq('id', runId);
-    console.log('✓ Status updated to processing\n');
+    await throwIfCancelled(runId);
 
-    // Fetch run details
-    console.log('[Step 2/6] Fetching run details...');
-    const { data: run, error: runError } = await supabase
-      .from('analysis_runs')
-      .select('*')
-      .eq('id', runId)
-      .single();
+    console.log('[Step 1/7] Fetching run details...');
+    const run = await getRunById(runId);
 
-    if (runError || !run) {
+    if (!run) {
       throw new Error('Run not found');
     }
-    const runOwnerId = run.user_id || ANON_USER_ID;
+
+    if (!run.user_id) {
+      throw new Error('Run is missing user ownership');
+    }
+
+    if (run.status === 'cancel_requested' || run.cancel_requested) {
+      await updateRunStatus(runId, 'cancelled', { percentage: run.progress_percentage ?? 0, message: 'Cancelled by user' });
+      return;
+    }
+
+    if (run.status !== 'processing') {
+      await updateRunStatus(runId, 'processing', { percentage: 0, message: 'Starting analysis...' });
+    }
+
+    const runOwnerId = run.user_id;
+    const queueWaitMs = run.created_at ? Date.now() - new Date(run.created_at).getTime() : 0;
+    if (queueWaitMs > 0) {
+      trackMetric('processor.queue_wait_ms', queueWaitMs, { runId });
+    }
     console.log(`✓ Run details fetched: ${run.title}`);
-    console.log(`  Video path: ${run.video_storage_path}\n`);
+    console.log(`  Video path: ${run.video_storage_path}`);
     console.log('[Processor] Run owner', { runId, userId: runOwnerId });
 
-    // Download video from storage
-    console.log('[Step 3/6] Downloading video from storage...');
-    await updateProgress(runId, 10, 'Downloading video...');
-    const { data: videoData, error: downloadError } = await supabase.storage
-      .from('videos')
-      .download(run.video_storage_path);
+    await throwIfCancelled(runId);
 
-    if (downloadError || !videoData) {
+    console.log('[Step 2/7] Downloading video from Azure Blob Storage...');
+    await updateProgress(runId, 10, 'Downloading video...');
+
+    let videoBuffer: Buffer;
+    try {
+      videoBuffer = await downloadBlob(run.video_storage_path);
+    } catch (downloadError) {
       console.error('✗ Failed to download video:', downloadError);
       throw new Error('Failed to download video');
     }
-    const videoSizeMB = (videoData.size / 1024 / 1024).toFixed(2);
-    console.log(`✓ Video downloaded successfully (${videoSizeMB} MB)\n`);
 
-    // Extract frames
-    console.log('[Step 4/6] Extracting frames from video...');
-    console.log('  Using ffmpeg to extract frames at 2 FPS...');
+    const validation = await validateVideoBuffer(videoBuffer, runId);
+    console.log('✓ Video validated', validation);
+
+    await throwIfCancelled(runId);
+
+    console.log('[Step 3/7] Extracting frames from video...');
     await updateProgress(runId, 20, 'Extracting frames from video...');
-    const frames = await extractFrames(videoData, runId);
-    const keyframeCount = frames.filter(f => f.isKeyframe).length;
-    console.log(`✓ Extracted ${frames.length} total frames`);
-    console.log(`✓ Identified ${keyframeCount} keyframes for analysis\n`);
-    console.log('[Processor] Frames extracted', {
-      runId,
-      totalFrames: frames.length,
-      keyframes: keyframeCount,
-    });
 
-    // Upload frames to storage and save to DB
-    console.log('[Step 5/6] Uploading frames to storage and saving to database...');
+    const videoBlob = new Blob([videoBuffer]);
+    const frames = await extractFrames(videoBlob, runId);
+    const keyframeCount = frames.filter((frame) => frame.isKeyframe).length;
+
+    console.log(`✓ Extracted ${frames.length} total frames`);
+    console.log(`✓ Identified ${keyframeCount} keyframes for analysis`);
+
+    await throwIfCancelled(runId);
+
+    console.log('[Step 4/7] Uploading frames to Azure Blob Storage and saving metadata...');
     await updateProgress(runId, 40, `Uploading ${frames.length} frames...`);
-    const frameRecords = [];
+
+    const frameRecords: Array<{
+      id: string;
+      run_id: string;
+      storage_path: string;
+      timestamp_ms: number;
+      is_keyframe: boolean;
+      diff_score: number;
+      buffer: Buffer;
+    }> = [];
+
     let uploadedCount = 0;
     for (const frame of frames) {
+      await throwIfCancelled(runId);
+
       const framePath = `${runOwnerId}/runs/${runId}/frames/${frame.id}.jpg`;
 
-      // Upload to storage
-      const { error: uploadError } = await supabase.storage
-        .from('videos')
-        .upload(framePath, frame.buffer, {
-          contentType: 'image/jpeg',
-          upsert: true,
+      try {
+        await uploadBlob(framePath, frame.buffer, 'image/jpeg');
+        await insertFrame({
+          id: frame.id,
+          runId,
+          storagePath: framePath,
+          timestampMs: frame.timestampMs,
+          isKeyframe: frame.isKeyframe,
+          diffScore: frame.diffScore,
         });
 
-      if (uploadError) {
-        console.error(`  ✗ Failed to upload frame ${frame.id}:`, uploadError);
-        continue;
-      }
-
-      // Save frame record
-      const { data: frameRecord, error: frameError } = await supabase
-        .from('frames')
-        .insert({
+        frameRecords.push({
           id: frame.id,
           run_id: runId,
           storage_path: framePath,
           timestamp_ms: frame.timestampMs,
           is_keyframe: frame.isKeyframe,
           diff_score: frame.diffScore,
-        })
-        .select()
-        .single();
+          buffer: frame.buffer,
+        });
 
-      if (frameError) {
-        console.error(`  ✗ Failed to save frame record ${frame.id}:`, frameError);
-        continue;
-      }
-
-      if (frameRecord) {
-        frameRecords.push({ ...frameRecord, buffer: frame.buffer });
         uploadedCount++;
-        if (uploadedCount % 10 === 0 || uploadedCount === frames.length) {
-          console.log(`  Progress: ${uploadedCount}/${frames.length} frames uploaded`);
-        }
+      } catch (uploadError) {
+        console.error(`✗ Failed to upload frame ${frame.id}:`, uploadError);
       }
     }
-    console.log(`✓ All frames uploaded and saved to database\n`);
 
-    // Analyze keyframes
-    console.log('[Step 6/6] Analyzing keyframes with OpenAI Vision API...');
-    const framesOrdered = frameRecords
-      .slice()
-      .sort((a, b) => a.timestamp_ms - b.timestamp_ms);
+    console.log(`✓ Uploaded ${uploadedCount}/${frames.length} frames`);
+
+    await throwIfCancelled(runId);
+
+    console.log('[Step 5/7] Analyzing keyframes with Azure OpenAI...');
+    const framesOrdered = frameRecords.slice().sort((frameA, frameB) => frameA.timestamp_ms - frameB.timestamp_ms);
     const frameIndexMap = new Map(framesOrdered.map((frame, index) => [frame.id, index]));
-    const keyframes = framesOrdered.filter((f) => f.is_keyframe);
-    console.log(`  Total keyframes to analyze: ${keyframes.length}\n`);
+    const keyframes = framesOrdered.filter((frame) => frame.is_keyframe);
+
     await updateProgress(runId, 60, `Analyzing ${keyframes.length} keyframes with AI...`);
 
     let analyzedCount = 0;
     let failedCount = 0;
     const contextTrail: string[] = [];
-    for (let i = 0; i < keyframes.length; i++) {
-      const frame = keyframes[i];
+
+    for (let index = 0; index < keyframes.length; index++) {
+      await throwIfCancelled(runId);
+      const frame = keyframes[index];
+
       try {
-        console.log(`  [${i + 1}/${keyframes.length}] Analyzing frame ${frame.id} (${frame.timestamp_ms}ms)...`);
-        // Update progress during analysis (60-90% range)
-        const progressPercentage = 60 + Math.floor((i / keyframes.length) * 30);
-        await updateProgress(runId, progressPercentage, `Analyzing keyframe ${i + 1}/${keyframes.length}...`);
+        const progressPercentage = 60 + Math.floor((index / Math.max(keyframes.length, 1)) * 30);
+        await updateProgress(runId, progressPercentage, `Analyzing keyframe ${index + 1}/${keyframes.length}...`);
+
         const frameIndex = frameIndexMap.get(frame.id) ?? 0;
         const contextStart = Math.max(0, frameIndex - 1);
         const contextEnd = Math.min(framesOrdered.length, frameIndex + 2);
         const contextFrames = framesOrdered.slice(contextStart, contextEnd);
-        const contextBuffers = contextFrames.map((f) => f.buffer);
+        const contextBuffers = contextFrames.map((contextFrame) => contextFrame.buffer);
         const stripBuffer = await buildFrameStrip(contextBuffers);
-        const timestamps = contextFrames.map((f) => f.timestamp_ms);
+        const timestamps = contextFrames.map((contextFrame) => contextFrame.timestamp_ms);
         const priorContext = contextTrail.length > 0 ? contextTrail.join('\n') : undefined;
+
         const analysis = await analyzeFrame(stripBuffer, {
           sequence: {
             count: contextFrames.length,
@@ -234,69 +251,70 @@ export async function processRun(runId: string) {
           priorContext,
         });
 
-        const { error: insertError } = await supabase.from('frame_analyses').insert({
-          frame_id: frame.id,
-          rubric_scores: analysis.rubric_scores,
+        await insertFrameAnalysis({
+          frameId: frame.id,
+          rubricScores: analysis.rubric_scores,
           justifications: analysis.justifications,
-          issue_tags: analysis.issue_tags,
+          issueTags: analysis.issue_tags,
           suggestions: analysis.suggestions,
         });
 
-        if (insertError) {
-          console.error(`    ✗ Failed to save analysis:`, insertError);
-          failedCount++;
-        } else {
-          console.log(`    ✓ Analysis complete`);
-          const summaryLine = summarizeAnalysis(analysis, frame.timestamp_ms);
-          contextTrail.push(summaryLine);
-          // Keep last 5 summaries for better narrative continuity
-          if (contextTrail.length > 5) {
-            contextTrail.shift();
-          }
-          analyzedCount++;
+        const summaryLine = summarizeAnalysis(analysis, frame.timestamp_ms);
+        contextTrail.push(summaryLine);
+        if (contextTrail.length > 5) {
+          contextTrail.shift();
         }
-      } catch (error) {
-        console.error(`    ✗ Failed to analyze frame ${frame.id}:`, error);
+
+        analyzedCount++;
+      } catch (analysisError) {
+        console.error(`✗ Failed to analyze frame ${frame.id}:`, analysisError);
         failedCount++;
       }
     }
-    console.log(`\n✓ Keyframe analysis complete: ${analyzedCount} succeeded, ${failedCount} failed\n`);
-    console.log('[Processor] Analysis complete', {
-      runId,
-      analyzedCount,
-      failedCount,
-    });
 
-    // Generate summary
-    console.log('[Final Step] Generating summary report...');
+    console.log(`✓ Keyframe analysis complete: ${analyzedCount} succeeded, ${failedCount} failed`);
+    trackMetric('processor.keyframes_total', keyframes.length, { runId });
+    trackMetric('processor.keyframes_failed', failedCount, { runId });
+
+    await throwIfCancelled(runId);
+
+    console.log('[Step 6/7] Generating summary report...');
     await updateProgress(runId, 90, 'Generating summary report...');
     const summary = await generateSummary(runId);
-    console.log(`✓ Summary generated with ${summary.top_issues.length} top issues`);
-    console.log(`✓ Generated ${summary.recommendations.length} recommendations\n`);
 
-    const { error: summaryError } = await supabase.from('run_summaries').insert({
-      run_id: runId,
-      overall_scores: summary.overall_scores,
-      top_issues: summary.top_issues,
+    await insertRunSummary({
+      runId,
+      overallScores: summary.overall_scores as unknown as Record<string, number>,
+      topIssues: summary.top_issues,
       recommendations: summary.recommendations,
+      weightedScore100: summary.weighted_score_100,
+      criticalIssueCount: summary.critical_issue_count,
+      qualityGateStatus: summary.quality_gate_status,
+      confidenceByCategory: summary.confidence_by_category,
+      metricVersion: summary.metric_version,
     });
 
-    if (summaryError) {
-      console.error('✗ Failed to save summary:', summaryError);
-      throw new Error('Failed to save summary');
-    }
-    console.log('[Processor] Report saved', { runId });
-
-    // Mark as completed
-    await supabase
-      .from('analysis_runs')
-      .update({ status: 'completed', progress_percentage: 100, progress_message: 'Analysis complete!' })
-      .eq('id', runId);
+    console.log('[Step 7/7] Finalizing run...');
+    await updateRunStatus(runId, 'completed', { percentage: 100, message: 'Analysis complete!' });
+    trackMetric('processor.duration_ms', Date.now() - startedAt, { runId });
+    trackMetric('processor.weighted_score_100', summary.weighted_score_100, { runId });
+    trackEvent('processor.run_completed', {
+      runId,
+      qualityGate: summary.quality_gate_status,
+      metricVersion: summary.metric_version,
+    });
 
     console.log(`\n${'='.repeat(60)}`);
     console.log(`✓ PROCESSING COMPLETE FOR RUN: ${runId}`);
     console.log(`${'='.repeat(60)}\n`);
   } catch (error) {
+    if (error instanceof RunCancelledError) {
+      await updateRunStatus(runId, 'cancelled', undefined, 'Cancelled by user');
+      console.log(`[Processor] Run ${runId} cancelled by user request`);
+      trackEvent('processor.run_cancelled', { runId });
+      return;
+    }
+
     console.error(`\n${'='.repeat(60)}`);
     console.error(`✗ ERROR PROCESSING RUN: ${runId}`);
     console.error(`${'='.repeat(60)}`);
@@ -307,12 +325,7 @@ export async function processRun(runId: string) {
     }
     console.error(`${'='.repeat(60)}\n`);
 
-    await supabase
-      .from('analysis_runs')
-      .update({
-        status: 'failed',
-        error_message: error instanceof Error ? error.message : 'Unknown error',
-      })
-      .eq('id', runId);
+    await updateRunStatus(runId, 'failed', undefined, error instanceof Error ? error.message : 'Unknown error');
+    trackException(error, { runId });
   }
 }

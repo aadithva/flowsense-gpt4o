@@ -35,6 +35,9 @@ yarn-error.log*
 .branches
 .temp
 
+# local package cache override
+.npm-cache
+
 # processor temp files
 backend/temp/*
 !backend/temp/.gitkeep

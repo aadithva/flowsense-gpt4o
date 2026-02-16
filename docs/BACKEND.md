@@ -1,36 +1,42 @@
 # Backend (Processor)
 
 ## Overview
-The backend is an Express service that processes queued runs: downloads the video, extracts frames with ffmpeg, analyzes keyframes, and writes summaries back to Supabase.
 
-## Location
-- Source: `backend/src`
-- Entry: `backend/src/index.ts`
-- Pipeline: `backend/src/processor.ts`
+`backend` is the worker that processes queued runs:
+1. claims queued run atomically
+2. downloads video from Blob storage
+3. validates format/size via ffprobe
+4. extracts frames + keyframes
+5. runs Azure OpenAI frame analysis
+6. writes frame analyses + summary metric V2
+
+## Security controls
+
+- webhook auth: secret + HMAC signature + timestamp + nonce
+- replay protection with nonce TTL cache
+- cancellation checkpoints during processing
+- startup env validation (hard-fail)
 
 ## Endpoints
-- `GET /health` - service health check
-- `POST /process` - webhook trigger (expects `run_id` JSON and `X-Webhook-Secret` header)
 
-## Environment
-Create `backend/.env` (see `backend/.env.example`):
-```
-SUPABASE_URL=http://127.0.0.1:54321
-SUPABASE_SERVICE_ROLE_KEY=<your-service-role-key>
+- `GET /health`
+- `POST /process`
 
-OLLAMA_URL=http://localhost:11434
-VISION_MODEL=llama3.2-vision:11b
+## Local run
 
-WEBHOOK_SECRET=<same-as-web>
-PORT=3001
-```
-
-## Run Locally
-```
+```bash
 cd backend
 npm run dev
 ```
 
-## Notes
-- Requires `ffmpeg` on PATH (or set `FFMPEG_PATH`).
-- Vision defaults to Ollama. If you swap providers, update `backend/src/vision.ts`.
+## Required env
+
+See `backend/.env.example`.
+
+## Testing
+
+```bash
+cd backend
+npm run test
+npm run typecheck
+```
