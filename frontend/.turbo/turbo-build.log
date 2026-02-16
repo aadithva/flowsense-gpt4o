@@ -1,0 +1,30 @@
+
+> @interactive-flow/web@1.0.0 build
+> next build
+
+   ▲ Next.js 14.1.0
+   - Environments: .env.local
+
+   Creating an optimized production build ...
+Compiler edge-server unexpectedly exited with code: null and signal: SIGTERM
+ ✓ Compiled successfully
+   Linting and checking validity of types ...
+Failed to compile.
+
+./src/components/ReportView.tsx:492:41
+Type error: Parameter 'tag' implicitly has an 'any' type.
+
+[0m [90m 490 |[39m             [33m<[39m[33mh3[39m className[33m=[39m[32m"mb-3 font-semibold text-zinc-100"[39m[33m>[39m[33mIssues[39m [33mDetected[39m[33m<[39m[33m/[39m[33mh3[39m[33m>[39m[0m
+[0m [90m 491 |[39m             [33m<[39m[33mdiv[39m className[33m=[39m[32m"flex flex-wrap gap-2"[39m[33m>[39m[0m
+[0m[31m[1m>[22m[39m[90m 492 |[39m               {analysis[33m.[39missue_tags[33m.[39mmap((tag) [33m=>[39m ([0m
+[0m [90m     |[39m                                         [31m[1m^[22m[39m[0m
+[0m [90m 493 |[39m                 [33m<[39m[33mspan[39m[0m
+[0m [90m 494 |[39m                   key[33m=[39m{tag}[0m
+[0m [90m 495 |[39m                   className[33m=[39m[32m"rounded border border-red-500/30 bg-red-500/10 px-2 py-1 text-xs text-red-300"[39m[0m
+npm error Lifecycle script `build` failed with error:
+npm error code 1
+npm error path /Users/aadith/Claude/Projects/flowsense/frontend
+npm error workspace @interactive-flow/web@1.0.0
+npm error location /Users/aadith/Claude/Projects/flowsense/frontend
+npm error command failed
+npm error command sh -c next build

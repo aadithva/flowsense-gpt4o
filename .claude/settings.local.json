@@ -1,0 +1,20 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(node --version:*)",
+      "Bash(docker:*)",
+      "Bash(ffmpeg:*)",
+      "Bash(/opt/homebrew/bin/brew:*)",
+      "Bash(open:*)",
+      "Bash(/opt/homebrew/bin/ffmpeg:*)",
+      "Bash(npm install)",
+      "Bash(supabase start:*)",
+      "Bash(/opt/homebrew/bin/supabase start:*)",
+      "Bash(brew install:*)",
+      "Bash(npm install:*)",
+      "Bash(sudo npm install:*)",
+      "Bash(/usr/local/bin/brew install:*)",
+      "Bash(ollama list:*)"
+    ]
+  }
+}
