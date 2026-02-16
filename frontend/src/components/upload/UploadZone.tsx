@@ -1,8 +1,12 @@
 'use client';
 
 import { useCallback, useState } from 'react';
-import { FileVideo, Upload, Video, X } from 'lucide-react';
+import { FileVideo, Upload, X } from 'lucide-react';
 import { cn } from '@/lib/utils';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card } from '@/components/ui/card';
+import { Progress } from '@/components/ui/progress';
 
 interface UploadZoneProps {
   onFileSelect: (file: File, title: string) => void;
@@ -45,7 +49,6 @@ export default function UploadZone({
       return;
     }
     setSelectedFile(file);
-    // Auto-fill title from filename (remove extension)
     if (!title) {
       setTitle(file.name.replace(/\.[^/.]+$/, ''));
     }
@@ -97,79 +100,74 @@ export default function UploadZone({
   // Uploading state
   if (isUploading) {
     return (
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-8">
+      <Card className="p-8">
         <div className="mb-4 flex items-center gap-3">
-          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-cyan-500/10">
-            <Upload className="h-5 w-5 text-cyan-400" />
+          <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-primary/10">
+            <Upload className="h-5 w-5 text-primary" />
           </div>
           <div>
-            <h3 className="font-medium text-white">Uploading video...</h3>
-            <p className="text-sm text-zinc-500">{uploadProgress}% complete</p>
+            <h3 className="font-medium text-foreground">Uploading video...</h3>
+            <p className="text-sm text-muted-foreground">{uploadProgress}% complete</p>
           </div>
         </div>
-        <div className="h-2 overflow-hidden rounded-full bg-zinc-800">
-          <div
-            className="h-full bg-cyan-500 transition-all duration-300"
-            style={{ width: `${uploadProgress}%` }}
-          />
-        </div>
-      </div>
+        <Progress value={uploadProgress} className="h-2" />
+      </Card>
     );
   }
 
   // File selected state (showing title input)
   if (selectedFile) {
     return (
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-6">
+      <Card className="p-6">
         <div className="flex items-start gap-4">
-          <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border border-cyan-500/20 bg-cyan-500/10">
-            <FileVideo className="h-6 w-6 text-cyan-400" />
+          <div className="flex h-12 w-12 flex-shrink-0 items-center justify-center rounded-lg border border-primary/20 bg-primary/10">
+            <FileVideo className="h-6 w-6 text-primary" />
           </div>
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
-              <p className="truncate font-medium text-white">{selectedFile.name}</p>
-              <button
+              <p className="truncate font-medium text-foreground">{selectedFile.name}</p>
+              <Button
                 type="button"
+                variant="ghost"
+                size="icon"
+                className="h-6 w-6"
                 onClick={handleCancel}
-                className="rounded-full p-1 transition-colors hover:bg-zinc-800"
               >
-                <X className="h-4 w-4 text-zinc-500" />
-              </button>
+                <X className="h-4 w-4" />
+              </Button>
             </div>
-            <p className="text-sm text-zinc-500">{formatFileSize(selectedFile.size)}</p>
+            <p className="text-sm text-muted-foreground">{formatFileSize(selectedFile.size)}</p>
 
-            <div className="mt-4">
-              <label className="mb-2 block text-sm font-medium text-zinc-300">
+            <div className="mt-4 space-y-2">
+              <label className="text-sm font-medium text-zinc-300">
                 Analysis Title
               </label>
-              <input
+              <Input
                 type="text"
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="e.g., Login Flow - v1"
-                className="w-full rounded-lg border border-zinc-800 bg-black px-4 py-2 text-white placeholder:text-zinc-600 focus:border-cyan-500 focus:outline-none focus:ring-2 focus:ring-cyan-500/20"
                 autoFocus
               />
             </div>
 
             <div className="mt-4 flex gap-3">
-              <button
+              <Button
                 onClick={handleSubmit}
                 disabled={!title.trim()}
-                className="rounded-lg bg-cyan-500 px-4 py-2 font-medium text-black transition-colors hover:bg-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-cyan-500"
               >
                 Start Analysis
-              </button>
-              <button
+              </Button>
+              <Button
+                variant="outline"
                 onClick={handleCancel}
-                className="rounded-lg border border-zinc-800 bg-transparent px-4 py-2 font-medium text-zinc-300 transition-colors hover:bg-zinc-900 hover:text-white"
               >
                 Cancel
-              </button>
+              </Button>
             </div>
           </div>
         </div>
-      </div>
+      </Card>
     );
   }
 
@@ -183,8 +181,8 @@ export default function UploadZone({
       className={cn(
         'relative rounded-2xl border-2 border-dashed p-8 text-center transition-all duration-200',
         isDragActive
-          ? 'scale-[1.01] border-cyan-500 bg-cyan-500/5'
-          : 'border-zinc-800 bg-zinc-900/40 hover:border-zinc-700 hover:bg-zinc-900/60'
+          ? 'scale-[1.01] border-primary bg-primary/5'
+          : 'border-border bg-card/40 hover:border-muted-foreground/50 hover:bg-card/60'
       )}
     >
       <input
@@ -194,19 +192,19 @@ export default function UploadZone({
         className="absolute inset-0 h-full w-full cursor-pointer opacity-0"
       />
 
-      <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-zinc-800">
+      <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-secondary">
         <Upload
           className={cn(
             'h-7 w-7 transition-colors',
-            isDragActive ? 'text-cyan-400' : 'text-zinc-500'
+            isDragActive ? 'text-primary' : 'text-muted-foreground'
           )}
         />
       </div>
 
-      <p className="mb-1 text-lg font-medium text-white">
+      <p className="mb-1 text-lg font-medium text-foreground">
         {isDragActive ? 'Drop video here' : 'Drop video or click to browse'}
       </p>
-      <p className="text-sm text-zinc-500">MP4, MOV, MKV up to 500MB</p>
+      <p className="text-sm text-muted-foreground">MP4, MOV, MKV up to 500MB</p>
     </div>
   );
 }

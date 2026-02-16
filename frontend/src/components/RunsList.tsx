@@ -3,6 +3,9 @@
 import { useEffect, useState } from 'react';
 import type { AnalysisRun } from '@interactive-flow/shared';
 import RunCard from './analysis/RunCard';
+import { Card } from '@/components/ui/card';
+import { Skeleton } from '@/components/ui/skeleton';
+import { FileVideo } from 'lucide-react';
 
 export default function RunsList() {
   const [runs, setRuns] = useState<AnalysisRun[]>([]);
@@ -45,38 +48,25 @@ export default function RunsList() {
 
   if (loading) {
     return (
-      <div className="flex items-center justify-center py-12">
-        <div className="text-center">
-          <div className="mx-auto mb-4 h-8 w-8 animate-spin rounded-full border-4 border-zinc-800 border-t-cyan-500" />
-          <p className="text-sm text-zinc-500">Loading analyses...</p>
-        </div>
+      <div className="space-y-3">
+        <Skeleton className="h-24 w-full" />
+        <Skeleton className="h-24 w-full" />
+        <Skeleton className="h-24 w-full" />
       </div>
     );
   }
 
   if (runs.length === 0) {
     return (
-      <div className="rounded-2xl border border-zinc-800 bg-zinc-900/40 p-12 text-center">
-        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-zinc-800">
-          <svg
-            className="h-8 w-8 text-zinc-600"
-            fill="none"
-            stroke="currentColor"
-            viewBox="0 0 24 24"
-          >
-            <path
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              strokeWidth={2}
-              d="M7 21h10a2 2 0 002-2V9.414a1 1 0 00-.293-.707l-5.414-5.414A1 1 0 0012.586 3H7a2 2 0 00-2 2v14a2 2 0 002 2z"
-            />
-          </svg>
+      <Card className="p-12 text-center">
+        <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-secondary">
+          <FileVideo className="h-8 w-8 text-muted-foreground" />
         </div>
-        <h3 className="mb-2 text-lg font-semibold text-white">No analyses yet</h3>
-        <p className="text-sm text-zinc-500">
+        <h3 className="mb-2 text-lg font-semibold text-foreground">No analyses yet</h3>
+        <p className="text-sm text-muted-foreground">
           Upload your first screen recording to get started
         </p>
-      </div>
+      </Card>
     );
   }
 

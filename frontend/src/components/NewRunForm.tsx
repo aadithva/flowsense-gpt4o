@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import UploadZone from './upload/UploadZone';
+import { Alert, AlertDescription } from '@/components/ui/alert';
+import { AlertCircle } from 'lucide-react';
 
 export default function NewRunForm() {
   const [loading, setLoading] = useState(false);
@@ -83,9 +85,10 @@ export default function NewRunForm() {
       />
 
       {error && (
-        <div className="rounded-lg border border-red-900/50 bg-red-950/30 p-4 text-sm text-red-400">
-          {error}
-        </div>
+        <Alert variant="destructive">
+          <AlertCircle className="h-4 w-4" />
+          <AlertDescription>{error}</AlertDescription>
+        </Alert>
       )}
     </div>
   );

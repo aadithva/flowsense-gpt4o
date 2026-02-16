@@ -10,8 +10,14 @@
   },
   "dependencies": {
     "@interactive-flow/shared": "*",
+    "@radix-ui/react-alert-dialog": "^1.1.15",
+    "@radix-ui/react-progress": "^1.1.8",
+    "@radix-ui/react-separator": "^1.1.8",
+    "@radix-ui/react-slot": "^1.2.4",
+    "@radix-ui/react-tooltip": "^1.2.8",
     "@supabase/ssr": "^0.1.0",
     "@supabase/supabase-js": "^2.39.3",
+    "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
     "html2canvas": "^1.4.1",
     "jspdf": "^4.0.0",
@@ -21,7 +27,8 @@
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "recharts": "^3.7.0",
-    "tailwind-merge": "^3.4.0",
+    "tailwind-merge": "^3.4.1",
+    "tailwindcss-animate": "^1.0.7",
     "zod": "^3.22.4"
   },
   "devDependencies": {
