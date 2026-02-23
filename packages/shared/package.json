@@ -14,18 +14,18 @@
     }
   },
   "scripts": {
-    "build": "npx tsc",
-    "typecheck": "npx tsc --noEmit",
+    "build": "tsc",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "dev": "tsc --watch",
     "clean": "rm -rf dist"
   },
   "dependencies": {
+    "@types/node": "^20.10.6",
     "typescript": "^5.3.3",
     "zod": "^3.22.4"
   },
   "devDependencies": {
-    "@types/node": "^20.10.6",
     "vitest": "^2.1.9"
   }
 }
