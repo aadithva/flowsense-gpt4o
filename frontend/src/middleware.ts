@@ -1,10 +1,7 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
-// Authentication disabled for local development
-// To re-enable, restore the Entra ID session validation
-
+// Authentication disabled - all requests pass through
 export async function middleware(_request: NextRequest) {
-  // Allow all requests through without authentication
   return NextResponse.next();
 }
 

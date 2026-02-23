@@ -262,6 +262,13 @@ export async function insertRunSummary(data: {
   qualityGateStatus: 'pass' | 'warn' | 'block';
   confidenceByCategory: Record<keyof RubricScores, number>;
   metricVersion: string;
+  videoFlowDescription?: {
+    application: string;
+    user_intent: string;
+    key_actions: string[];
+    flow_narrative: string;
+    synthesis_confidence: number;
+  };
 }) {
   const db = await getPool();
   await db
@@ -275,6 +282,7 @@ export async function insertRunSummary(data: {
     .input('qualityGateStatus', sql.NVarChar(10), data.qualityGateStatus)
     .input('confidenceByCategory', sql.NVarChar(sql.MAX), JSON.stringify(data.confidenceByCategory))
     .input('metricVersion', sql.NVarChar(20), data.metricVersion)
+    .input('videoFlowDescription', sql.NVarChar(sql.MAX), data.videoFlowDescription ? JSON.stringify(data.videoFlowDescription) : null)
     .query(`
       MERGE run_summaries AS target
       USING (
@@ -287,7 +295,8 @@ export async function insertRunSummary(data: {
           @criticalIssueCount AS critical_issue_count,
           @qualityGateStatus AS quality_gate_status,
           @confidenceByCategory AS confidence_by_category,
-          @metricVersion AS metric_version
+          @metricVersion AS metric_version,
+          @videoFlowDescription AS video_flow_description
       ) AS source
         ON target.run_id = source.run_id
       WHEN MATCHED THEN
@@ -299,7 +308,8 @@ export async function insertRunSummary(data: {
           critical_issue_count = source.critical_issue_count,
           quality_gate_status = source.quality_gate_status,
           confidence_by_category = source.confidence_by_category,
-          metric_version = source.metric_version
+          metric_version = source.metric_version,
+          video_flow_description = source.video_flow_description
       WHEN NOT MATCHED THEN
         INSERT (
           run_id,
@@ -310,7 +320,8 @@ export async function insertRunSummary(data: {
           critical_issue_count,
           quality_gate_status,
           confidence_by_category,
-          metric_version
+          metric_version,
+          video_flow_description
         )
         VALUES (
           source.run_id,
@@ -321,7 +332,8 @@ export async function insertRunSummary(data: {
           source.critical_issue_count,
           source.quality_gate_status,
           source.confidence_by_category,
-          source.metric_version
+          source.metric_version,
+          source.video_flow_description
         );
     `);
 }
@@ -346,6 +358,9 @@ export async function getRunSummary(runId: string) {
     confidence_by_category: row.confidence_by_category
       ? JSON.parse(row.confidence_by_category)
       : null,
+    video_flow_description: row.video_flow_description
+      ? JSON.parse(row.video_flow_description)
+      : undefined,
   };
 }
 

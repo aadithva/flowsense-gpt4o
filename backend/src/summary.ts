@@ -5,16 +5,46 @@ import {
   type TopIssue,
   type Recommendation,
   type IssueTag,
+  type AnalysisEngineVersion,
+  type RunAnalysisTelemetry,
+  type VideoFlowDescription,
+  ANALYSIS_ENGINE_VERSIONS,
+  // V3 Summary types
+  type TokenUsage,
+  type EvidenceCoverage,
+  type SelfConsistencyMetrics,
+  type ShadowAnalysisDiff,
+  type FallbackApplied,
+  type SummaryV3Extension,
+  calculateEvidenceCoverage,
+  calculateSelfConsistencyScore,
+  computeShadowDiff,
+  applyDeterministicFallbacks,
 } from '@interactive-flow/shared';
+import { getAnalysisConfig } from './env';
 
 interface FrameAnalysis {
+  frame_id: string;  // From frame_analyses table join
   rubric_scores: RubricScores;
   issue_tags: IssueTag[];
   justifications: Record<string, string>;
   suggestions: unknown[];
+  flow_overview?: {
+    app_context: string;
+    user_intent: string;
+    actions_observed: string;
+  };
 }
 
 const METRIC_VERSION = 'v2';
+
+/**
+ * Get the current analysis engine version from configuration
+ */
+export function getActiveEngineVersion(): AnalysisEngineVersion {
+  const config = getAnalysisConfig();
+  return config.activeEngine;
+}
 const SCORE_CATEGORIES = ['cat1', 'cat2', 'cat3', 'cat4', 'cat5', 'cat6', 'cat7'] as const;
 
 type ScoreCategory = (typeof SCORE_CATEGORIES)[number];
@@ -113,6 +143,18 @@ export function determineQualityGateStatus(weightedScore100: number, criticalIss
 function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): Recommendation[] {
   const recommendations: Recommendation[] = [];
 
+  // Helper to get aggregated frame IDs from related issues
+  const getSourceFrameIds = (issueTags: IssueTag[]): string[] => {
+    const frameIds = new Set<string>();
+    for (const tag of issueTags) {
+      const issue = topIssues.find(i => i.tag === tag);
+      if (issue?.sourceFrameIds) {
+        issue.sourceFrameIds.forEach(id => frameIds.add(id));
+      }
+    }
+    return Array.from(frameIds);
+  };
+
   if (scores.cat1 < 2) {
     const relatedIssues = topIssues
       .filter((issue) => ['dead_click', 'delayed_response', 'ambiguous_response'].includes(issue.tag))
@@ -126,6 +168,7 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
         description:
           'Add immediate visual feedback for all user actions. Show pressed states on buttons, disable re-clicking during operations, and provide toast or inline confirmations.',
         relatedIssues,
+        sourceFrameIds: getSourceFrameIds(relatedIssues),
       });
     }
   }
@@ -143,6 +186,7 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
         description:
           'Show skeleton screens or spinners during loading. Display progress text for long operations. Disable CTAs with explanatory tooltips when actions are unavailable.',
         relatedIssues,
+        sourceFrameIds: getSourceFrameIds(relatedIssues),
       });
     }
   }
@@ -160,6 +204,7 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
         description:
           'Update button styles, hover states, and cursor indicators to match expected interactions. Make disabled states visually distinct with reduced opacity and explanatory tooltips.',
         relatedIssues,
+        sourceFrameIds: getSourceFrameIds(relatedIssues),
       });
     }
   }
@@ -177,6 +222,7 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
         description:
           'Remove redundant steps, preserve form state between pages, and keep context visible throughout the flow. Consider combining multiple steps into a single view.',
         relatedIssues,
+        sourceFrameIds: getSourceFrameIds(relatedIssues),
       });
     }
   }
@@ -194,6 +240,7 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
         description:
           'Make all errors visible with actionable messages. Provide inline fix suggestions, retry buttons, and learn-more links.',
         relatedIssues,
+        sourceFrameIds: getSourceFrameIds(relatedIssues),
       });
     }
   }
@@ -211,6 +258,7 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
         description:
           'Add smooth transitions between states, manage focus properly after actions, and reduce layout shift. Ensure animations enhance rather than distract.',
         relatedIssues,
+        sourceFrameIds: getSourceFrameIds(relatedIssues),
       });
     }
   }
@@ -230,6 +278,7 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
         description:
           'Reduce required steps, remove unnecessary confirmations, set better defaults, and add keyboard shortcuts for power users.',
         relatedIssues,
+        sourceFrameIds: getSourceFrameIds(relatedIssues),
       });
     }
   }
@@ -240,41 +289,115 @@ function generateRecommendations(topIssues: TopIssue[], scores: RubricScores): R
   });
 }
 
-export async function generateSummary(runId: string) {
+export interface GenerateSummaryInput {
+  /** Whether analysis was truncated due to token budget */
+  analysisTruncated?: boolean;
+  /** Number of frames skipped due to truncation */
+  framesSkipped?: number;
+  /** Total rerun count from two-pass inference */
+  twoPassRerunCount?: number;
+  /** Full run telemetry for V3 summary */
+  runTelemetry?: RunAnalysisTelemetry;
+  /** Average confidence from two-pass inference */
+  avgConfidence?: number;
+  /** Rerun reasons breakdown */
+  rerunReasons?: {
+    schema_coercion: number;
+    low_confidence: number;
+    extraction_failed: number;
+  };
+  /** Shadow analysis results (if shadow engine was enabled) */
+  shadowAnalysis?: {
+    weightedScore100: number;
+    criticalIssueCount: number;
+    qualityGateStatus: 'pass' | 'warn' | 'block';
+    engineVersion: AnalysisEngineVersion;
+  } | null;
+  /** Synthesized video-level flow description from context carry-over */
+  videoFlowDescription?: VideoFlowDescription;
+}
+
+export async function generateSummary(runId: string, options?: GenerateSummaryInput) {
   const analyses = (await getFrameAnalysesForRun(runId)) as FrameAnalysis[];
 
   if (!analyses || analyses.length === 0) {
     throw new Error('No analyses found for run');
   }
 
-  const overallScores: RubricScores = {
-    cat1: 0,
-    cat2: 0,
-    cat3: 0,
-    cat4: 0,
-    cat5: 0,
-    cat6: 0,
-    cat7: 0,
-  };
+  const engineVersion = getActiveEngineVersion();
+  const framesAnalyzed = options?.runTelemetry?.framesAnalyzed ?? analyses.length;
 
+  // Aggregate flow_overview from frame analyses (use the most detailed one)
+  const flowOverviews = analyses
+    .filter(a => a.flow_overview)
+    .map(a => a.flow_overview!);
+
+  // Pick the flow_overview with the longest combined content
+  const aggregatedFlowOverview = flowOverviews.length > 0
+    ? flowOverviews.reduce((best, current) => {
+        const bestLength = (best.app_context?.length || 0) + (best.user_intent?.length || 0) + (best.actions_observed?.length || 0);
+        const currentLength = (current.app_context?.length || 0) + (current.user_intent?.length || 0) + (current.actions_observed?.length || 0);
+        return currentLength > bestLength ? current : best;
+      })
+    : undefined;
+
+  // Aggregate raw scores first
+  const rawScores: Record<string, number> = {};
   for (const category of SCORE_CATEGORIES) {
     const avg = analyses.reduce((sum, analysis) => sum + (analysis.rubric_scores[category] || 0), 0) / analyses.length;
-    overallScores[category] = Math.round(avg) as 0 | 1 | 2;
+    rawScores[category] = avg;
   }
 
-  const issueCountMap = new Map<IssueTag, number>();
+  // Aggregate justifications for fallback check
+  const aggregatedJustifications: Record<string, string> = {};
+  for (const category of SCORE_CATEGORIES) {
+    // Use the most detailed justification (longest non-empty)
+    const justifications = analyses
+      .map(a => a.justifications?.[category] || '')
+      .filter(j => j.trim().length > 0)
+      .sort((a, b) => b.length - a.length);
+    aggregatedJustifications[category] = justifications[0] || '';
+  }
+
+  // V3 Day 7: Apply deterministic fallback rules for missing analysis segments
+  const { adjustedScores, fallbackApplied } = applyDeterministicFallbacks(
+    rawScores,
+    aggregatedJustifications,
+    SCORE_CATEGORIES,
+    framesAnalyzed
+  );
+
+  // Round adjusted scores to get final rubric scores
+  const overallScores: RubricScores = {
+    cat1: Math.round(adjustedScores.cat1 ?? 1) as 0 | 1 | 2,
+    cat2: Math.round(adjustedScores.cat2 ?? 1) as 0 | 1 | 2,
+    cat3: Math.round(adjustedScores.cat3 ?? 1) as 0 | 1 | 2,
+    cat4: Math.round(adjustedScores.cat4 ?? 1) as 0 | 1 | 2,
+    cat5: Math.round(adjustedScores.cat5 ?? 1) as 0 | 1 | 2,
+    cat6: Math.round(adjustedScores.cat6 ?? 1) as 0 | 1 | 2,
+    cat7: Math.round(adjustedScores.cat7 ?? 1) as 0 | 1 | 2,
+  };
+
+  // Track both count and source frame IDs for each issue tag
+  const issueDataMap = new Map<IssueTag, { count: number; frameIds: string[] }>();
   for (const analysis of analyses) {
     for (const tag of analysis.issue_tags) {
-      issueCountMap.set(tag, (issueCountMap.get(tag) || 0) + 1);
+      const existing = issueDataMap.get(tag) || { count: 0, frameIds: [] };
+      existing.count += 1;
+      if (analysis.frame_id && !existing.frameIds.includes(analysis.frame_id)) {
+        existing.frameIds.push(analysis.frame_id);
+      }
+      issueDataMap.set(tag, existing);
     }
   }
 
-  const topIssues: TopIssue[] = Array.from(issueCountMap.entries())
-    .map(([tag, count]) => ({
+  const topIssues: TopIssue[] = Array.from(issueDataMap.entries())
+    .map(([tag, data]) => ({
       tag,
-      count,
+      count: data.count,
       severity: determineSeverity(tag),
       description: getIssueDescription(tag),
+      sourceFrameIds: data.frameIds,
     }))
     .sort((a, b) => {
       const severityOrder = { high: 0, med: 1, low: 2 };
@@ -288,7 +411,19 @@ export async function generateSummary(runId: string) {
   const recommendations = generateRecommendations(topIssues, overallScores);
   const weightedScore100 = calculateWeightedScore100(overallScores);
   const criticalIssueCount = calculateCriticalIssueCount(topIssues);
-  const qualityGateStatus = determineQualityGateStatus(weightedScore100, criticalIssueCount);
+  let qualityGateStatus = determineQualityGateStatus(weightedScore100, criticalIssueCount);
+
+  // V3 Day 5-6: Force quality_gate_status='warn' when analysis was truncated
+  if (options?.analysisTruncated && qualityGateStatus === 'pass') {
+    qualityGateStatus = 'warn';
+    console.warn(`[Summary] Quality gate downgraded to 'warn' due to analysis truncation (${options.framesSkipped} frames skipped)`);
+  }
+
+  // V3 Day 7: Force quality_gate_status='warn' if fallbacks were applied
+  if (fallbackApplied.any_fallback && qualityGateStatus === 'pass') {
+    qualityGateStatus = 'warn';
+    console.warn(`[Summary] Quality gate downgraded to 'warn' due to fallback rules (${fallbackApplied.fallback_categories.length} categories)`);
+  }
 
   const confidenceByCategory = {
     cat1: calculateCategoryConfidence(analyses, 'cat1'),
@@ -300,7 +435,56 @@ export async function generateSummary(runId: string) {
     cat7: calculateCategoryConfidence(analyses, 'cat7'),
   };
 
+  // =============================================================================
+  // V3 Day 7: Calculate new metrics
+  // =============================================================================
+
+  // Token usage from telemetry
+  const tokenUsage: TokenUsage = {
+    prompt_tokens: options?.runTelemetry?.totalPromptTokens ?? 0,
+    completion_tokens: options?.runTelemetry?.totalCompletionTokens ?? 0,
+    total_tokens: options?.runTelemetry?.totalTokens ?? 0,
+  };
+
+  // Evidence coverage calculation
+  const evidenceCoverage = calculateEvidenceCoverage(analyses, SCORE_CATEGORIES);
+
+  // Self-consistency metrics
+  const selfConsistency = calculateSelfConsistencyScore(
+    options?.twoPassRerunCount ?? 0,
+    framesAnalyzed,
+    options?.avgConfidence ?? 0.8, // Default to 0.8 if not provided
+    options?.rerunReasons ?? { schema_coercion: 0, low_confidence: 0, extraction_failed: 0 }
+  );
+
+  // Shadow diff computation
+  const shadowDiff = computeShadowDiff(
+    weightedScore100,
+    criticalIssueCount,
+    qualityGateStatus,
+    options?.shadowAnalysis?.weightedScore100 ?? null,
+    options?.shadowAnalysis?.criticalIssueCount ?? null,
+    options?.shadowAnalysis?.qualityGateStatus ?? null,
+    options?.shadowAnalysis?.engineVersion ?? null
+  );
+
+  // Build V3 extension
+  const v3Extension: SummaryV3Extension = {
+    analysis_engine_version: engineVersion,
+    token_usage: tokenUsage,
+    evidence_coverage: evidenceCoverage,
+    self_consistency: selfConsistency,
+    shadow_diff: shadowDiff,
+    fallback_applied: fallbackApplied,
+    analysis_truncated: options?.analysisTruncated ?? false,
+    frames_skipped: options?.framesSkipped ?? 0,
+    frames_analyzed: framesAnalyzed,
+    schema_normalization_rate: options?.runTelemetry?.schemaNormalizationRate ?? 0,
+    total_inference_ms: options?.runTelemetry?.totalInferenceMs ?? 0,
+  };
+
   return {
+    // V2 fields (backward compatible)
     overall_scores: overallScores,
     top_issues: topIssues,
     recommendations,
@@ -309,5 +493,17 @@ export async function generateSummary(runId: string) {
     quality_gate_status: qualityGateStatus,
     confidence_by_category: confidenceByCategory,
     metric_version: METRIC_VERSION,
+    // Flow overview - describes what's happening in the UI (per-frame)
+    flow_overview: aggregatedFlowOverview,
+    // Synthesized video-level flow description (from context carry-over)
+    video_flow_description: options?.videoFlowDescription,
+    // V3 fields at root level for backward compatibility
+    analysis_engine_version: engineVersion,
+    analysis_truncated: options?.analysisTruncated ?? false,
+    frames_skipped: options?.framesSkipped ?? 0,
+    two_pass_rerun_count: options?.twoPassRerunCount ?? 0,
+    // V3 extension object with full diagnostics
+    v3: v3Extension,
   };
 }
+

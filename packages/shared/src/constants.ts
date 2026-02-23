@@ -4,7 +4,7 @@ export const RUBRIC_CATEGORIES = {
   cat3: 'Interaction Predictability & Affordance',
   cat4: 'Flow Continuity & Friction',
   cat5: 'Error Handling & Recovery',
-  cat6: 'Micro-interaction Quality (Polish)',
+  cat6: 'Interaction Quality',
   cat7: 'Efficiency & Interaction Cost',
 } as const;
 
@@ -32,6 +32,12 @@ export const VISION_MODEL_PROMPT = `You are a UX interaction-flow evaluator. You
 
 Your job is to analyze the INTERACTION visible across these frames and score the interaction quality using a detailed rubric.
 
+FLOW OVERVIEW (Required):
+First, analyze the entire frame sequence to understand:
+1. What application/interface is being used (e.g., "VS Code", "Settings panel", "E-commerce checkout")
+2. What is the user trying to accomplish? What is their goal/intent?
+3. Describe the key actions observed in the flow (e.g., "User clicks submit button, waits for response, navigates to confirmation page")
+
 KEY ANALYSIS APPROACH:
 - Look for STATE CHANGES across frames: What transitions occur? What appears/disappears?
 - Detect interaction signals: Button state changes, cursor changes, loading indicators, navigation
@@ -51,11 +57,17 @@ Look for: Button press states in frame transitions, cursor changes (pointer→pr
 Key issues: dead_click, delayed_response, ambiguous_response
 
 ### Category 2: Feedback & System Status Visibility (cat2) - Score 0/1/2
-- Score 2 (Good): System state always visible, loading states clear with spinners/progress bars, operations provide feedback
+- Score 2 (Good): System state always visible, loading states clear with spinners/progress bars/streaming text, operations provide feedback
 - Score 1 (Fair): Some status indicators present but incomplete or could be clearer
 - Score 0 (Poor): Silent operations with no feedback, missing loading indicators, unclear system state
 
-Look for: Spinners/progress bars during waits, disabled state styling (grayed out, cursor changes), status messages, process indicators, completion confirmations
+Look for:
+- Spinners/progress bars during waits
+- **Streaming/progressive text rendering** (AI assistants like Copilot, ChatGPT, Claude show text appearing character-by-character - this IS valid feedback)
+- Disabled state styling (grayed out, cursor changes)
+- Status messages, process indicators, completion confirmations
+
+IMPORTANT: In AI chat interfaces, streaming text that progressively appears IS system status feedback. The act of text being typed/rendered shows the system is actively processing.
 
 Key issues: missing_spinner, unclear_disabled_state, no_progress_feedback
 
@@ -86,7 +98,7 @@ Look for: Error messages and their clarity, inline validation feedback, suggesti
 
 Key issues: silent_error, blocking_error, recovery_unclear
 
-### Category 6: Micro-interaction Quality (Polish) (cat6) - Score 0/1/2
+### Category 6: Interaction Quality (cat6) - Score 0/1/2
 - Score 2 (Good): Smooth transitions between states, good focus management, pleasant animations that aid understanding
 - Score 1 (Fair): Functional but could be smoother, minor polish issues
 - Score 0 (Poor): Jarring transitions (instant state changes), confusing focus (unclear where you are), distracting or disorienting animations
@@ -115,6 +127,11 @@ SCORING INSTRUCTIONS:
 ISSUE TAGS - Use only tags from this fixed set:
 dead_click, delayed_response, ambiguous_response, missing_spinner, unclear_disabled_state, no_progress_feedback, misleading_affordance, surprise_navigation, mode_switch_surprise, backtracking, repeated_actions, context_loss, silent_error, blocking_error, recovery_unclear, jarring_transition, distracting_animation, focus_confusion, too_many_steps, over_clicking, excessive_cursor_travel, redundant_confirmations
 
+ISSUE TAG GUIDANCE (to avoid false positives):
+- "unclear_disabled_state" → ONLY flag when a UI element APPEARS interactive but user attempts to interact and gets no response. Do NOT flag: grayed out elements, obviously inactive areas, streaming content, or elements that are simply not being interacted with.
+- "dead_click" → ONLY flag when you see explicit evidence of a click (cursor position change, click animation) with no visual response. Do NOT flag: normal navigation, AI streaming responses.
+- "missing_spinner" → ONLY flag when there's a visible wait period with NO feedback. Streaming text IS feedback. Progressive loading IS feedback.
+
 IMPROVEMENT SUGGESTIONS:
 - Provide 3–8 actionable improvement suggestions
 - Each must have severity: high (critical UX issue), med (noticeable problem), or low (nice-to-have enhancement)
@@ -137,6 +154,11 @@ Issues: dead_click, missing_spinner
 
 Return ONLY valid JSON that matches this schema:
 {
+  "flow_overview": {
+    "app_context": "Name/type of app or interface being used (e.g., 'VS Code editor', 'E-commerce checkout')",
+    "user_intent": "What the user is trying to accomplish (e.g., 'Complete a purchase', 'Save a file')",
+    "actions_observed": "Brief description of key actions in the flow (e.g., 'User fills form, clicks submit, sees confirmation')"
+  },
   "rubric_scores": { "cat1":0|1|2, "cat2":0|1|2, "cat3":0|1|2, "cat4":0|1|2, "cat5":0|1|2, "cat6":0|1|2, "cat7":0|1|2 },
   "justifications": { "cat1": "...", "cat2":"...", "cat3":"...", "cat4":"...", "cat5":"...", "cat6":"...", "cat7":"..." },
   "issue_tags": ["..."],

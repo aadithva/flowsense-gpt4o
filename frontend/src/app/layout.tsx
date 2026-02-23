@@ -19,7 +19,7 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${spaceGrotesk.className} antialiased`}>
+      <body className={`${spaceGrotesk.className} antialiased bg-[#09090b]`}>
         <ThemeProvider>
           <TooltipProvider>
             <AppShell>{children}</AppShell>

@@ -53,7 +53,23 @@ export const suggestionSchema = z.object({
   description: z.string(),
 });
 
+export const flowOverviewSchema = z.object({
+  app_context: z.string(),
+  user_intent: z.string(),
+  actions_observed: z.string(),
+});
+
+/** Schema for synthesized video-level flow description */
+export const videoFlowDescriptionSchema = z.object({
+  application: z.string(),
+  user_intent: z.string(),
+  key_actions: z.array(z.string()),
+  flow_narrative: z.string(),
+  synthesis_confidence: z.number().min(0).max(1),
+});
+
 export const visionAnalysisResponseSchema = z.object({
+  flow_overview: flowOverviewSchema.optional(),
   rubric_scores: rubricScoresSchema,
   justifications: justificationsSchema,
   issue_tags: z.array(issueTagSchema),

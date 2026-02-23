@@ -4,6 +4,8 @@ import {
   getFrameCountForRun,
   getRunSummary,
   getRunsByUser,
+  getShadowSummary,
+  computeShadowDiffFromSummaries,
 } from '@/lib/azure/db';
 import { generateUploadSasUrl } from '@/lib/azure/storage';
 import { getAuthenticatedUser, UnauthorizedError, unauthorizedResponse } from '@/lib/auth/require-auth';
@@ -114,6 +116,14 @@ export async function GET() {
         let criticalIssueCount: number | undefined;
         let qualityGateStatus: 'pass' | 'warn' | 'block' | undefined;
         let metricVersion: string | undefined;
+        // V3 fields
+        let analysisEngineVersion: string | undefined;
+        let analysisTruncated: boolean | undefined;
+        let shadowDelta: {
+          weighted_score_delta: number;
+          critical_issue_delta: number;
+          quality_gate_changed: boolean;
+        } | null = null;
 
         if (run.status === 'completed') {
           const summary = await getRunSummary(run.id);
@@ -127,6 +137,26 @@ export async function GET() {
             criticalIssueCount = summary.critical_issue_count;
             qualityGateStatus = summary.quality_gate_status;
             metricVersion = summary.metric_version;
+            // V3 fields
+            analysisEngineVersion = summary.analysis_engine_version;
+            analysisTruncated = summary.analysis_truncated;
+
+            // Get shadow summary for delta computation (only for internal use)
+            try {
+              const shadow = await getShadowSummary(run.id);
+              if (shadow) {
+                const diff = computeShadowDiffFromSummaries(summary, shadow);
+                if (diff.shadow_enabled && diff.weighted_score_delta !== null) {
+                  shadowDelta = {
+                    weighted_score_delta: diff.weighted_score_delta,
+                    critical_issue_delta: diff.critical_issue_delta ?? 0,
+                    quality_gate_changed: diff.quality_gate_changed,
+                  };
+                }
+              }
+            } catch {
+              // Shadow table may not exist yet, ignore errors
+            }
           }
         }
 
@@ -138,6 +168,10 @@ export async function GET() {
           critical_issue_count: criticalIssueCount,
           quality_gate_status: qualityGateStatus,
           metric_version: metricVersion,
+          // V3 fields
+          analysis_engine_version: analysisEngineVersion,
+          analysis_truncated: analysisTruncated,
+          shadow_delta: shadowDelta,
         };
       })
     );

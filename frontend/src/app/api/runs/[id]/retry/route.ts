@@ -32,11 +32,12 @@ export async function POST(
       return NextResponse.json({ error: 'Run not found' }, { status: 404 });
     }
 
-    if (run.status === 'queued' || run.status === 'processing') {
+    if (run.status === 'queued') {
       return NextResponse.json({ success: true, status: run.status });
     }
 
-    if (!['completed', 'failed', 'cancelled', 'cancel_requested'].includes(run.status)) {
+    // Allow retrying stuck "processing" runs (e.g., processor died mid-analysis)
+    if (!['completed', 'failed', 'cancelled', 'cancel_requested', 'processing'].includes(run.status)) {
       return NextResponse.json({ error: 'Retry is not available for this run state' }, { status: 400 });
     }
 

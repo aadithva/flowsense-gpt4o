@@ -1,6 +1,6 @@
 import sql, { ConnectionPool } from 'mssql';
 import { DefaultAzureCredential } from '@azure/identity';
-import type { RubricScores, RunSummary } from '@interactive-flow/shared';
+import type { RubricScores, RunSummary, ShadowSummary, V3Diagnostics } from '@interactive-flow/shared';
 import { getServerEnv } from '@/lib/env/server';
 
 let pool: ConnectionPool | null = null;
@@ -29,6 +29,26 @@ function defaultConfidence(): Record<keyof RubricScores, number> {
 }
 
 function normalizeRunSummaryRow(row: Record<string, unknown>): RunSummary {
+  // Parse V3 diagnostics if available
+  let v3Diagnostics: V3Diagnostics | undefined;
+  if (typeof row.v3_diagnostics === 'string' && row.v3_diagnostics) {
+    try {
+      v3Diagnostics = JSON.parse(row.v3_diagnostics);
+    } catch {
+      v3Diagnostics = undefined;
+    }
+  }
+
+  // Parse video flow description if available
+  let videoFlowDescription: RunSummary['video_flow_description'] | undefined;
+  if (typeof row.video_flow_description === 'string' && row.video_flow_description) {
+    try {
+      videoFlowDescription = JSON.parse(row.video_flow_description);
+    } catch {
+      videoFlowDescription = undefined;
+    }
+  }
+
   return {
     run_id: row.run_id as string,
     overall_scores: JSON.parse(row.overall_scores as string),
@@ -51,6 +71,16 @@ function normalizeRunSummaryRow(row: Record<string, unknown>): RunSummary {
         ? row.metric_version
         : 'v1',
     created_at: row.created_at as string,
+    // V3 fields
+    analysis_engine_version:
+      typeof row.analysis_engine_version === 'string' && row.analysis_engine_version.trim().length > 0
+        ? row.analysis_engine_version
+        : 'v3_hybrid',
+    analysis_truncated: row.analysis_truncated === true || row.analysis_truncated === 1,
+    frames_skipped: typeof row.frames_skipped === 'number' ? row.frames_skipped : 0,
+    frames_analyzed: typeof row.frames_analyzed === 'number' ? row.frames_analyzed : 0,
+    v3_diagnostics: v3Diagnostics,
+    video_flow_description: videoFlowDescription,
   };
 }
 
@@ -312,6 +342,178 @@ export async function deleteSummaryForRun(runId: string) {
     .request()
     .input('runId', sql.UniqueIdentifier, runId)
     .query('DELETE FROM run_summaries WHERE run_id = @runId');
+}
+
+/**
+ * V3: Get shadow summary for a run (if exists)
+ */
+export async function getShadowSummary(runId: string): Promise<ShadowSummary | null> {
+  const db = await getPool();
+  const result = await db
+    .request()
+    .input('runId', sql.UniqueIdentifier, runId)
+    .query(`
+      SELECT * FROM run_summaries_versions
+      WHERE run_id = @runId AND is_shadow = 1
+    `);
+
+  const row = result.recordset[0] as Record<string, unknown> | undefined;
+  if (!row) return null;
+
+  // Parse V3 diagnostics if available
+  let v3Diagnostics: V3Diagnostics | undefined;
+  if (typeof row.v3_diagnostics === 'string' && row.v3_diagnostics) {
+    try {
+      v3Diagnostics = JSON.parse(row.v3_diagnostics);
+    } catch {
+      v3Diagnostics = undefined;
+    }
+  }
+
+  return {
+    overall_scores: JSON.parse(row.overall_scores as string),
+    top_issues: JSON.parse(row.top_issues as string),
+    recommendations: JSON.parse(row.recommendations as string),
+    weighted_score_100: typeof row.weighted_score_100 === 'number' ? row.weighted_score_100 : 0,
+    critical_issue_count: typeof row.critical_issue_count === 'number' ? row.critical_issue_count : 0,
+    quality_gate_status:
+      row.quality_gate_status === 'pass' ||
+      row.quality_gate_status === 'warn' ||
+      row.quality_gate_status === 'block'
+        ? row.quality_gate_status
+        : 'warn',
+    confidence_by_category:
+      typeof row.confidence_by_category === 'string'
+        ? JSON.parse(row.confidence_by_category)
+        : defaultConfidence(),
+    metric_version:
+      typeof row.metric_version === 'string' && row.metric_version.trim().length > 0
+        ? row.metric_version
+        : 'v2',
+    analysis_engine_version:
+      typeof row.analysis_engine_version === 'string' && row.analysis_engine_version.trim().length > 0
+        ? row.analysis_engine_version
+        : 'v3_hybrid',
+    analysis_truncated: row.analysis_truncated === true || row.analysis_truncated === 1,
+    frames_skipped: typeof row.frames_skipped === 'number' ? row.frames_skipped : 0,
+    frames_analyzed: typeof row.frames_analyzed === 'number' ? row.frames_analyzed : 0,
+    v3_diagnostics: v3Diagnostics,
+    is_shadow: true,
+    shadow_sample_rate: typeof row.shadow_sample_rate === 'number' ? row.shadow_sample_rate : undefined,
+  };
+}
+
+/**
+ * V3: Insert shadow summary (V3 analysis result)
+ */
+export async function insertShadowSummary(data: {
+  runId: string;
+  analysisEngineVersion: 'v2_baseline' | 'v3_hybrid';
+  overallScores: Record<string, number>;
+  topIssues: Array<{ category: string; severity: string; description: string }>;
+  recommendations: Array<{ title: string; description: string; priority: string }>;
+  weightedScore100: number;
+  criticalIssueCount: number;
+  qualityGateStatus: 'pass' | 'warn' | 'block';
+  confidenceByCategory: Record<string, number>;
+  metricVersion: string;
+  analysisTruncated: boolean;
+  framesSkipped: number;
+  framesAnalyzed: number;
+  v3Diagnostics?: Record<string, unknown>;
+  isShadow: boolean;
+  shadowSampleRate?: number;
+}): Promise<void> {
+  const db = await getPool();
+  await db
+    .request()
+    .input('runId', sql.UniqueIdentifier, data.runId)
+    .input('analysisEngineVersion', sql.NVarChar(20), data.analysisEngineVersion)
+    .input('overallScores', sql.NVarChar(sql.MAX), JSON.stringify(data.overallScores))
+    .input('topIssues', sql.NVarChar(sql.MAX), JSON.stringify(data.topIssues))
+    .input('recommendations', sql.NVarChar(sql.MAX), JSON.stringify(data.recommendations))
+    .input('weightedScore100', sql.Float, data.weightedScore100)
+    .input('criticalIssueCount', sql.Int, data.criticalIssueCount)
+    .input('qualityGateStatus', sql.NVarChar(10), data.qualityGateStatus)
+    .input('confidenceByCategory', sql.NVarChar(sql.MAX), JSON.stringify(data.confidenceByCategory))
+    .input('metricVersion', sql.NVarChar(20), data.metricVersion)
+    .input('analysisTruncated', sql.Bit, data.analysisTruncated ? 1 : 0)
+    .input('framesSkipped', sql.Int, data.framesSkipped)
+    .input('framesAnalyzed', sql.Int, data.framesAnalyzed)
+    .input('v3Diagnostics', sql.NVarChar(sql.MAX), data.v3Diagnostics ? JSON.stringify(data.v3Diagnostics) : null)
+    .input('isShadow', sql.Bit, data.isShadow ? 1 : 0)
+    .input('shadowSampleRate', sql.Float, data.shadowSampleRate ?? null)
+    .query(`
+      MERGE run_summaries_versions AS target
+      USING (SELECT @runId AS run_id, @analysisEngineVersion AS analysis_engine_version) AS source
+      ON target.run_id = source.run_id AND target.analysis_engine_version = source.analysis_engine_version
+      WHEN MATCHED THEN
+        UPDATE SET
+          overall_scores = @overallScores,
+          top_issues = @topIssues,
+          recommendations = @recommendations,
+          weighted_score_100 = @weightedScore100,
+          critical_issue_count = @criticalIssueCount,
+          quality_gate_status = @qualityGateStatus,
+          confidence_by_category = @confidenceByCategory,
+          metric_version = @metricVersion,
+          analysis_truncated = @analysisTruncated,
+          frames_skipped = @framesSkipped,
+          frames_analyzed = @framesAnalyzed,
+          v3_diagnostics = @v3Diagnostics,
+          is_shadow = @isShadow,
+          shadow_sample_rate = @shadowSampleRate
+      WHEN NOT MATCHED THEN
+        INSERT (
+          run_id, analysis_engine_version, overall_scores, top_issues, recommendations,
+          weighted_score_100, critical_issue_count, quality_gate_status, confidence_by_category,
+          metric_version, analysis_truncated, frames_skipped, frames_analyzed, v3_diagnostics,
+          is_shadow, shadow_sample_rate
+        ) VALUES (
+          @runId, @analysisEngineVersion, @overallScores, @topIssues, @recommendations,
+          @weightedScore100, @criticalIssueCount, @qualityGateStatus, @confidenceByCategory,
+          @metricVersion, @analysisTruncated, @framesSkipped, @framesAnalyzed, @v3Diagnostics,
+          @isShadow, @shadowSampleRate
+        );
+    `);
+}
+
+/**
+ * V3: Compute shadow diff between primary and shadow summaries
+ */
+export function computeShadowDiffFromSummaries(
+  primary: RunSummary,
+  shadow: ShadowSummary | null
+): {
+  shadow_enabled: boolean;
+  shadow_engine_version: string | null;
+  weighted_score_delta: number | null;
+  critical_issue_delta: number | null;
+  quality_gate_changed: boolean;
+  primary_quality_gate: 'pass' | 'warn' | 'block';
+  shadow_quality_gate: 'pass' | 'warn' | 'block' | null;
+} {
+  if (!shadow) {
+    return {
+      shadow_enabled: false,
+      shadow_engine_version: null,
+      weighted_score_delta: null,
+      critical_issue_delta: null,
+      quality_gate_changed: false,
+      primary_quality_gate: primary.quality_gate_status,
+      shadow_quality_gate: null,
+    };
+  }
+
+  return {
+    shadow_enabled: true,
+    shadow_engine_version: shadow.analysis_engine_version,
+    weighted_score_delta: Number((shadow.weighted_score_100 - primary.weighted_score_100).toFixed(2)),
+    critical_issue_delta: shadow.critical_issue_count - primary.critical_issue_count,
+    quality_gate_changed: shadow.quality_gate_status !== primary.quality_gate_status,
+    primary_quality_gate: primary.quality_gate_status,
+    shadow_quality_gate: shadow.quality_gate_status,
+  };
 }
 
 export { sql };

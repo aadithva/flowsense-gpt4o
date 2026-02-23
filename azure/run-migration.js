@@ -45,7 +45,8 @@ async function runMigration() {
       { name: 'critical_issue_count', type: 'INT', default: '0' },
       { name: 'quality_gate_status', type: 'NVARCHAR(20)', default: "'pending'" },
       { name: 'confidence_by_category', type: 'NVARCHAR(MAX)', default: "'{}'" },
-      { name: 'metric_version', type: 'NVARCHAR(20)', default: "'v2'" }
+      { name: 'metric_version', type: 'NVARCHAR(20)', default: "'v2'" },
+      { name: 'video_flow_description', type: 'NVARCHAR(MAX)', default: 'NULL', nullable: true }
     ];
 
     for (const col of summaryColumns) {
@@ -57,9 +58,15 @@ async function runMigration() {
 
       if (check.recordset.length === 0) {
         console.log(`Adding ${col.name} column to run_summaries...`);
-        await pool.request().query(`
-          ALTER TABLE run_summaries ADD ${col.name} ${col.type} NOT NULL DEFAULT ${col.default}
-        `);
+        if (col.nullable) {
+          await pool.request().query(`
+            ALTER TABLE run_summaries ADD ${col.name} ${col.type} NULL
+          `);
+        } else {
+          await pool.request().query(`
+            ALTER TABLE run_summaries ADD ${col.name} ${col.type} NOT NULL DEFAULT ${col.default}
+          `);
+        }
         console.log(`Column ${col.name} added`);
       }
     }

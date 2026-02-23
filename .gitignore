@@ -9,35 +9,58 @@ coverage
 # next.js
 .next/
 out/
+
+# build output
 build
 dist
+
+# turbo
+.turbo
 
 # misc
 .DS_Store
 *.pem
+Thumbs.db
 
 # debug
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+pnpm-debug.log*
 
 # local env files
-.env*.local
 .env
+.env*.local
+.env.development
+.env.production
+.env.staging
 
 # vercel
 .vercel
 
 # typescript
 *.tsbuildinfo
+next-env.d.ts
 
-# supabase
+# supabase (legacy)
 .branches
 .temp
 
-# local package cache override
+# local package cache
 .npm-cache
 
 # processor temp files
 backend/temp/*
 !backend/temp/.gitkeep
+
+# IDE
+.idea
+.vscode
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+.AppleDouble
+.LSOverride

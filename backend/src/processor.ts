@@ -8,10 +8,22 @@ import {
 } from './azure-db';
 import { downloadBlob, uploadBlob } from './azure-storage';
 import { extractFrames, validateVideoBuffer } from './ffmpeg';
-import { analyzeFrame } from './vision';
+import { analyzeFrame, analyzeFrameV3 } from './vision';
+import { executeTwoPassInference } from './two-pass-inference';
 import { generateSummary } from './summary';
+import { synthesizeVideoFlow } from './flow-synthesis';
+import { getAnalysisConfig, getPreprocessingConfig, getTwoPassConfig } from './env';
+import { preprocessFramesForAnalysis, calculateSSIM } from './preprocessing';
 import sharp from 'sharp';
 import { trackEvent, trackException, trackMetric } from './telemetry';
+import {
+  createEmptyRunTelemetry,
+  type RunAnalysisTelemetry,
+  type FrameChangeContext,
+  type FlowOverview,
+  ANALYSIS_ENGINE_VERSIONS,
+  type PreprocessingDiagnostics,
+} from '@interactive-flow/shared';
 
 class RunCancelledError extends Error {
   constructor(message = 'Run cancellation requested') {
@@ -175,6 +187,7 @@ export async function processRun(runId: string) {
       is_keyframe: boolean;
       diff_score: number;
       buffer: Buffer;
+      changeContext?: FrameChangeContext;
     }> = [];
 
     let uploadedCount = 0;
@@ -202,6 +215,7 @@ export async function processRun(runId: string) {
           is_keyframe: frame.isKeyframe,
           diff_score: frame.diffScore,
           buffer: frame.buffer,
+          changeContext: frame.changeContext,
         });
 
         uploadedCount++;
@@ -221,35 +235,223 @@ export async function processRun(runId: string) {
 
     await updateProgress(runId, 60, `Analyzing ${keyframes.length} keyframes with AI...`);
 
+    // Get analysis configuration for V3 accuracy upgrade
+    const analysisConfig = getAnalysisConfig();
+    const preprocessingConfig = getPreprocessingConfig();
+    const twoPassConfig = getTwoPassConfig();
+    const engineVersion = analysisConfig.activeEngine;
+    const useV3Pipeline = engineVersion === ANALYSIS_ENGINE_VERSIONS.V3_HYBRID && preprocessingConfig.enableChangeDetection;
+    const useTwoPass = useV3Pipeline && twoPassConfig.enableTwoPass;
+    const runTelemetry = createEmptyRunTelemetry(engineVersion);
+
+    console.log(`[Processor] Using analysis engine: ${engineVersion}`);
+    console.log(`[Processor] V3 preprocessing pipeline: ${useV3Pipeline ? 'enabled' : 'disabled'}`);
+    console.log(`[Processor] Two-pass inference: ${useTwoPass ? 'enabled' : 'disabled'}`);
+    console.log(`[Processor] Token budget: ${analysisConfig.tokenHardCapTotal} total, ${analysisConfig.tokenHardCapPerFrame} per frame`);
+
     let analyzedCount = 0;
     let failedCount = 0;
+    let preprocessFallbackCount = 0;
+    let twoPassRerunCount = 0;
+    let totalConfidence = 0;
+    const rerunReasons = {
+      schema_coercion: 0,
+      low_confidence: 0,
+      extraction_failed: 0,
+    };
     const contextTrail: string[] = [];
+    const collectedFlowOverviews: FlowOverview[] = [];
+
+    // V3: Preprocess all frames if V3 pipeline is enabled
+    let preprocessedFrames: Awaited<ReturnType<typeof preprocessFramesForAnalysis>>['frames'] | undefined;
+    if (useV3Pipeline) {
+      console.log('[Processor] Running V3 preprocessing pipeline...');
+      const preprocessStartTime = Date.now();
+      const preprocessResult = await preprocessFramesForAnalysis(
+        framesOrdered.map(f => ({
+          id: f.id,
+          buffer: f.buffer,
+          timestampMs: f.timestamp_ms,
+          isKeyframe: f.is_keyframe,
+          changeContext: f.changeContext,
+        })),
+        preprocessingConfig
+      );
+      preprocessedFrames = preprocessResult.frames;
+      console.log(`[Processor] V3 preprocessing complete in ${Date.now() - preprocessStartTime}ms`);
+      console.log(`[Processor] Preprocessing stats: ${preprocessResult.stats.successfulPreprocess}/${preprocessResult.stats.totalKeyframes} successful, ${preprocessResult.stats.fallbackCount} fallbacks, avg window size: ${preprocessResult.stats.avgTemporalWindowSize.toFixed(1)}`);
+      trackMetric('processor.preprocessing_ms', Date.now() - preprocessStartTime, { runId, engineVersion });
+      trackMetric('processor.preprocessing_fallbacks', preprocessResult.stats.fallbackCount, { runId, engineVersion });
+    }
 
     for (let index = 0; index < keyframes.length; index++) {
       await throwIfCancelled(runId);
       const frame = keyframes[index];
 
+      // Check if we've exceeded the total token budget
+      if (runTelemetry.totalTokens >= analysisConfig.tokenHardCapTotal) {
+        console.warn(`[Processor] Token budget exceeded (${runTelemetry.totalTokens}/${analysisConfig.tokenHardCapTotal}). Stopping analysis.`);
+        runTelemetry.analysisTruncated = true;
+        runTelemetry.truncationReason = 'token_cap_total';
+        runTelemetry.framesSkipped = keyframes.length - index;
+        trackEvent('processor.analysis_truncated', {
+          runId,
+          reason: 'token_cap_total',
+          tokensUsed: String(runTelemetry.totalTokens),
+          framesAnalyzed: String(index),
+          framesSkipped: String(keyframes.length - index),
+        });
+        break;
+      }
+
       try {
         const progressPercentage = 60 + Math.floor((index / Math.max(keyframes.length, 1)) * 30);
         await updateProgress(runId, progressPercentage, `Analyzing keyframe ${index + 1}/${keyframes.length}...`);
 
-        const frameIndex = frameIndexMap.get(frame.id) ?? 0;
-        const contextStart = Math.max(0, frameIndex - 1);
-        const contextEnd = Math.min(framesOrdered.length, frameIndex + 2);
-        const contextFrames = framesOrdered.slice(contextStart, contextEnd);
-        const contextBuffers = contextFrames.map((contextFrame) => contextFrame.buffer);
-        const stripBuffer = await buildFrameStrip(contextBuffers);
-        const timestamps = contextFrames.map((contextFrame) => contextFrame.timestamp_ms);
         const priorContext = contextTrail.length > 0 ? contextTrail.join('\n') : undefined;
+        let analysis: Awaited<ReturnType<typeof analyzeFrame>>['analysis'];
+        let frameTelemetry: Awaited<ReturnType<typeof analyzeFrame>>['telemetry'];
 
-        const analysis = await analyzeFrame(stripBuffer, {
-          sequence: {
-            count: contextFrames.length,
-            order: 'left-to-right oldest-to-newest',
-            timestampsMs: timestamps,
-          },
-          priorContext,
-        });
+        // V3: Use multi-image payload if preprocessed data is available
+        if (useV3Pipeline && preprocessedFrames) {
+          const preprocessed = preprocessedFrames[index];
+          if (preprocessed.preprocessFallback) {
+            preprocessFallbackCount++;
+          }
+
+          // Calculate SSIM scores for diagnostics
+          let ssimScores: number[] | undefined;
+          if (preprocessed.temporalWindow.buffers.length >= 2) {
+            ssimScores = [];
+            for (let i = 0; i < preprocessed.temporalWindow.buffers.length - 1; i++) {
+              const ssim = await calculateSSIM(
+                preprocessed.temporalWindow.buffers[i],
+                preprocessed.temporalWindow.buffers[i + 1]
+              );
+              ssimScores.push(ssim);
+            }
+          }
+
+          const diagnostics: PreprocessingDiagnostics = {
+            preprocessFallback: preprocessed.preprocessFallback,
+            fallbackReason: preprocessed.fallbackReason as PreprocessingDiagnostics['fallbackReason'],
+            ssimScores,
+            avgChangeIntensity: preprocessed.changeContext.overallChangeScore,
+            temporalWindowSize: preprocessed.temporalWindow.buffers.length,
+            preprocessingMs: 0, // Already tracked above
+          };
+
+          // V3 Day 5-6: Use two-pass inference if enabled
+          if (useTwoPass) {
+            const twoPassResult = await executeTwoPassInference(
+              preprocessed.rawStrip,
+              preprocessed.diffHeatmapStrip,
+              preprocessed.changeCrop,
+              {
+                temporalMetadata: {
+                  relativeIndices: preprocessed.temporalWindow.relativeIndices,
+                  timestamps: preprocessed.temporalWindow.timestamps,
+                  deltaMs: preprocessed.temporalWindow.deltaMs,
+                  keyframeIndex: preprocessed.temporalWindow.relativeIndices.indexOf(0),
+                },
+                priorContextTrail: priorContext,
+                changeContext: preprocessed.changeContext,
+                diagnostics,
+                keyframeIndex: index,
+              },
+              engineVersion,
+              () => throwIfCancelled(runId)
+            );
+
+            analysis = {
+              ...twoPassResult.rubricAnalysis,
+              // Copy flow_overview from two-pass extraction if available
+              flow_overview: twoPassResult.rubricAnalysis.flow_overview,
+            };
+            frameTelemetry = {
+              engineVersion,
+              promptTokens: twoPassResult.telemetry.totalTokens, // Combined for reporting
+              completionTokens: 0,
+              totalTokens: twoPassResult.telemetry.totalTokens,
+              inferenceMs: twoPassResult.telemetry.totalMs,
+              schemaNormalized: twoPassResult.schemaNormalized,
+              truncationReason: 'none',
+            };
+            twoPassRerunCount += twoPassResult.telemetry.rerunMetrics.rerunCount;
+
+            // Track confidence for self-consistency metrics
+            totalConfidence += twoPassResult.extraction.overallConfidence;
+
+            // Track rerun reasons
+            for (const reason of twoPassResult.telemetry.rerunMetrics.rerunReasons) {
+              rerunReasons[reason]++;
+            }
+
+            // Track two-pass specific metrics
+            trackMetric('processor.two_pass_a_tokens', twoPassResult.telemetry.passATokens, { runId, engineVersion });
+            trackMetric('processor.two_pass_b_tokens', twoPassResult.telemetry.passBTokens, { runId, engineVersion });
+            trackMetric('processor.two_pass_reruns', twoPassResult.telemetry.rerunMetrics.rerunCount, { runId, engineVersion });
+          } else {
+            // V3 single-pass (backwards compatible)
+            const result = await analyzeFrameV3(
+              preprocessed.rawStrip,
+              preprocessed.diffHeatmapStrip,
+              preprocessed.changeCrop,
+              {
+                temporalMetadata: {
+                  relativeIndices: preprocessed.temporalWindow.relativeIndices,
+                  timestamps: preprocessed.temporalWindow.timestamps,
+                  deltaMs: preprocessed.temporalWindow.deltaMs,
+                  keyframeIndex: preprocessed.temporalWindow.relativeIndices.indexOf(0),
+                },
+                priorContextTrail: priorContext,
+                changeContext: preprocessed.changeContext,
+                diagnostics,
+                keyframeIndex: index,
+              },
+              engineVersion
+            );
+
+            analysis = result.analysis;
+            frameTelemetry = result.telemetry;
+          }
+        } else {
+          // V2: Use original single-image analysis
+          const frameIndex = frameIndexMap.get(frame.id) ?? 0;
+          const contextStart = Math.max(0, frameIndex - 2);
+          const contextEnd = Math.min(framesOrdered.length, frameIndex + 3);
+          const contextFrames = framesOrdered.slice(contextStart, contextEnd);
+          const contextBuffers = contextFrames.map((contextFrame) => contextFrame.buffer);
+          const stripBuffer = await buildFrameStrip(contextBuffers);
+          const timestamps = contextFrames.map((contextFrame) => contextFrame.timestamp_ms);
+
+          const result = await analyzeFrame(
+            stripBuffer,
+            {
+              sequence: {
+                count: contextFrames.length,
+                order: 'left-to-right oldest-to-newest',
+                timestampsMs: timestamps,
+              },
+              priorContext,
+              changeContext: frame.changeContext,
+            },
+            engineVersion
+          );
+
+          analysis = result.analysis;
+          frameTelemetry = result.telemetry;
+        }
+
+        // Aggregate frame telemetry into run telemetry
+        runTelemetry.totalPromptTokens += frameTelemetry.promptTokens;
+        runTelemetry.totalCompletionTokens += frameTelemetry.completionTokens;
+        runTelemetry.totalTokens += frameTelemetry.totalTokens;
+        runTelemetry.totalInferenceMs += frameTelemetry.inferenceMs;
+        if (frameTelemetry.schemaNormalized) {
+          runTelemetry.schemaNormalizedCount++;
+        }
+        runTelemetry.framesAnalyzed++;
 
         await insertFrameAnalysis({
           frameId: frame.id,
@@ -261,8 +463,14 @@ export async function processRun(runId: string) {
 
         const summaryLine = summarizeAnalysis(analysis, frame.timestamp_ms);
         contextTrail.push(summaryLine);
-        if (contextTrail.length > 5) {
+        // Extended context trail from 5 to 10 frames for better temporal understanding
+        if (contextTrail.length > 10) {
           contextTrail.shift();
+        }
+
+        // Collect flow_overview for video-level synthesis
+        if (analysis.flow_overview) {
+          collectedFlowOverviews.push(analysis.flow_overview);
         }
 
         analyzedCount++;
@@ -272,15 +480,71 @@ export async function processRun(runId: string) {
       }
     }
 
+    // Track V3-specific metrics
+    if (useV3Pipeline) {
+      trackMetric('processor.preprocess_fallback_count', preprocessFallbackCount, { runId, engineVersion });
+    }
+
+    // Calculate schema normalization rate
+    runTelemetry.schemaNormalizationRate = runTelemetry.framesAnalyzed > 0
+      ? runTelemetry.schemaNormalizedCount / runTelemetry.framesAnalyzed
+      : 0;
+
     console.log(`✓ Keyframe analysis complete: ${analyzedCount} succeeded, ${failedCount} failed`);
+    console.log(`✓ Token usage: ${runTelemetry.totalTokens} total (${runTelemetry.totalPromptTokens} prompt, ${runTelemetry.totalCompletionTokens} completion)`);
+    console.log(`✓ Schema normalization rate: ${(runTelemetry.schemaNormalizationRate * 100).toFixed(1)}%`);
+    if (runTelemetry.analysisTruncated) {
+      console.warn(`⚠ Analysis truncated: ${runTelemetry.truncationReason}, ${runTelemetry.framesSkipped} frames skipped`);
+    }
+
     trackMetric('processor.keyframes_total', keyframes.length, { runId });
     trackMetric('processor.keyframes_failed', failedCount, { runId });
+    trackMetric('processor.tokens_total', runTelemetry.totalTokens, { runId, engineVersion });
+    trackMetric('processor.tokens_prompt', runTelemetry.totalPromptTokens, { runId, engineVersion });
+    trackMetric('processor.tokens_completion', runTelemetry.totalCompletionTokens, { runId, engineVersion });
+    trackMetric('processor.inference_ms_total', runTelemetry.totalInferenceMs, { runId, engineVersion });
+    trackMetric('processor.schema_normalization_rate', runTelemetry.schemaNormalizationRate, { runId, engineVersion });
 
     await throwIfCancelled(runId);
 
+    // Step 5.5: Synthesize video flow description from context carry-over
+    console.log('[Step 5.5/7] Synthesizing video flow description...');
+    let videoFlowDescription;
+    if (contextTrail.length >= 3 || collectedFlowOverviews.length >= 2) {
+      try {
+        const synthesisResult = await synthesizeVideoFlow(contextTrail, collectedFlowOverviews);
+        videoFlowDescription = synthesisResult.description;
+        runTelemetry.totalTokens += synthesisResult.tokensUsed;
+        console.log(`✓ Video flow synthesized: "${videoFlowDescription.application}" (confidence: ${videoFlowDescription.synthesis_confidence})`);
+        trackMetric('processor.synthesis_tokens', synthesisResult.tokensUsed, { runId, engineVersion });
+        trackMetric('processor.synthesis_confidence', videoFlowDescription.synthesis_confidence, { runId, engineVersion });
+      } catch (synthesisError) {
+        console.warn('[Processor] Video flow synthesis failed (non-fatal):', synthesisError);
+        // Non-fatal - continue without video description
+      }
+    } else {
+      console.log('[Processor] Skipping video flow synthesis (insufficient context)');
+    }
+
     console.log('[Step 6/7] Generating summary report...');
     await updateProgress(runId, 90, 'Generating summary report...');
-    const summary = await generateSummary(runId);
+
+    // Calculate average confidence for self-consistency metrics
+    const avgConfidence = analyzedCount > 0 ? totalConfidence / analyzedCount : 0.8;
+
+    const summary = await generateSummary(runId, {
+      analysisTruncated: runTelemetry.analysisTruncated,
+      framesSkipped: runTelemetry.framesSkipped,
+      twoPassRerunCount,
+      runTelemetry,
+      avgConfidence,
+      rerunReasons,
+      // Shadow analysis would be computed here if shadow engine is enabled
+      // For now, pass null (shadow analysis is tracked separately)
+      shadowAnalysis: null,
+      // Video flow description synthesized from context carry-over
+      videoFlowDescription,
+    });
 
     await insertRunSummary({
       runId,
@@ -292,6 +556,7 @@ export async function processRun(runId: string) {
       qualityGateStatus: summary.quality_gate_status,
       confidenceByCategory: summary.confidence_by_category,
       metricVersion: summary.metric_version,
+      videoFlowDescription: summary.video_flow_description,
     });
 
     console.log('[Step 7/7] Finalizing run...');

@@ -1,8 +1,20 @@
 import OpenAI from 'openai';
-import { VISION_MODEL_PROMPT, issueTagSchema, visionAnalysisResponseSchema } from '@interactive-flow/shared';
+import {
+  VISION_MODEL_PROMPT,
+  issueTagSchema,
+  visionAnalysisResponseSchema,
+  type FrameAnalysisTelemetry,
+  type AnalysisEngineVersion,
+  ANALYSIS_ENGINE_VERSIONS,
+  createEmptyFrameTelemetry,
+  type FrameChangeContext,
+  formatChangeContextForPrompt,
+  type TemporalWindowMetadata,
+  type PreprocessingDiagnostics,
+} from '@interactive-flow/shared';
 
 // Azure OpenAI Configuration
-import { getEnv } from './env';
+import { getEnv, getAnalysisConfig, getPreprocessingConfig } from './env';
 
 const env = getEnv();
 const AZURE_OPENAI_ENDPOINT = env.AZURE_OPENAI_ENDPOINT;
@@ -72,6 +84,68 @@ function normalizeSeverity(value: unknown) {
   return 'low';
 }
 
+function normalizeFlowOverview(raw: any) {
+  if (!raw?.flow_overview) return undefined;
+  const fo = raw.flow_overview;
+  return {
+    app_context: typeof fo.app_context === 'string' ? fo.app_context.trim() : 'Unknown application',
+    user_intent: typeof fo.user_intent === 'string' ? fo.user_intent.trim() : 'Unknown intent',
+    actions_observed: typeof fo.actions_observed === 'string' ? fo.actions_observed.trim() : 'No actions observed',
+  };
+}
+
+/**
+ * Validate issue tags against rubric scores to prevent false positives.
+ * If a rubric category indicates good quality, remove contradicting issue tags.
+ */
+function validateIssueTags(
+  issueTags: string[],
+  rubricScores: Record<string, number>
+): string[] {
+  let validated = [...issueTags];
+
+  // cat1 (Action Response) = 2 (Good) → remove dead_click
+  // If the system responded well to actions, there can't be dead clicks
+  if (rubricScores.cat1 === 2) {
+    validated = validated.filter(tag => tag !== 'dead_click');
+  }
+
+  // cat2 (Feedback Visibility) = 2 (Good) → remove missing_spinner, no_progress_feedback
+  // If feedback is visible and clear, these issues don't exist
+  if (rubricScores.cat2 === 2) {
+    validated = validated.filter(
+      tag => !['missing_spinner', 'no_progress_feedback'].includes(tag)
+    );
+  }
+
+  // cat3 (Visual Hierarchy) = 2 (Good) → remove poor_contrast, unclear_cta
+  if (rubricScores.cat3 === 2) {
+    validated = validated.filter(
+      tag => !['poor_contrast', 'unclear_cta'].includes(tag)
+    );
+  }
+
+  // cat4 (Error Handling) = 2 (Good) → remove unclear_error, no_error_recovery
+  if (rubricScores.cat4 === 2) {
+    validated = validated.filter(
+      tag => !['unclear_error', 'no_error_recovery'].includes(tag)
+    );
+  }
+
+  // cat5 (Navigation) = 2 (Good) → remove confusing_nav
+  if (rubricScores.cat5 === 2) {
+    validated = validated.filter(tag => tag !== 'confusing_nav');
+  }
+
+  // Log when tags are removed for monitoring
+  const removedTags = issueTags.filter(tag => !validated.includes(tag));
+  if (removedTags.length > 0) {
+    console.log(`[Vision] Validated issue tags: removed ${removedTags.join(', ')} (contradicted by rubric scores)`);
+  }
+
+  return validated;
+}
+
 function normalizeAnalysis(raw: any) {
   const rawScores = raw?.rubric_scores ?? {};
   const rawJustifications = raw?.justifications ?? {};
@@ -95,9 +169,12 @@ function normalizeAnalysis(raw: any) {
     cat7: validateJustification(rawJustifications.cat7, 'cat7', rubric_scores.cat7),
   };
 
-  const issue_tags = Array.isArray(raw?.issue_tags)
+  const rawIssueTags = Array.isArray(raw?.issue_tags)
     ? raw.issue_tags.filter((tag: unknown) => typeof tag === 'string' && ALLOWED_ISSUE_TAGS.has(tag))
     : [];
+
+  // Validate issue tags against rubric scores to prevent false positives
+  const issue_tags = validateIssueTags(rawIssueTags, rubric_scores);
 
   const suggestions = Array.isArray(raw?.suggestions)
     ? raw.suggestions
@@ -112,7 +189,24 @@ function normalizeAnalysis(raw: any) {
         .filter((suggestion: any) => suggestion.description)
     : [];
 
-  return { rubric_scores, justifications, issue_tags, suggestions };
+  const flow_overview = normalizeFlowOverview(raw);
+
+  return { rubric_scores, justifications, issue_tags, suggestions, ...(flow_overview && { flow_overview }) };
+}
+
+export interface AnalyzeFrameResult {
+  analysis: {
+    rubric_scores: Record<string, number>;
+    justifications: Record<string, string>;
+    issue_tags: string[];
+    suggestions: Array<{ severity: 'high' | 'med' | 'low'; title: string; description: string }>;
+    flow_overview?: {
+      app_context: string;
+      user_intent: string;
+      actions_observed: string;
+    };
+  };
+  telemetry: FrameAnalysisTelemetry;
 }
 
 export async function analyzeFrame(
@@ -120,8 +214,15 @@ export async function analyzeFrame(
   context?: {
     sequence?: { count: number; order: string; timestampsMs?: number[] };
     priorContext?: string;
-  }
-) {
+    /** V3: Change context from preprocessing */
+    changeContext?: FrameChangeContext;
+  },
+  engineVersion: AnalysisEngineVersion = ANALYSIS_ENGINE_VERSIONS.V2_BASELINE
+): Promise<AnalyzeFrameResult> {
+  const startTime = Date.now();
+  const telemetry = createEmptyFrameTelemetry(engineVersion);
+  const preprocessingConfig = getPreprocessingConfig();
+
   const base64Image = frameBuffer.toString('base64');
   const sequenceNote = context?.sequence
     ? `\n\nThis image is a sequence of ${context.sequence.count} consecutive frames arranged ${context.sequence.order}. Use changes across frames to infer interaction signals.${
@@ -134,8 +235,13 @@ export async function analyzeFrame(
     ? `\n\nContext from previous frames (carry this forward when judging the current frame):\n${context.priorContext}`
     : '';
 
+  // V3: Add change context to prompt if enabled
+  const changeNote = preprocessingConfig.includeChangeContext && context?.changeContext
+    ? formatChangeContextForPrompt(context.changeContext)
+    : '';
+
   try {
-    console.log(`[Vision] Analyzing frame with Azure OpenAI GPT-4o (deployment: ${AZURE_OPENAI_DEPLOYMENT})`);
+    console.log(`[Vision] Analyzing frame with Azure OpenAI GPT-4o (deployment: ${AZURE_OPENAI_DEPLOYMENT}, engine: ${engineVersion})`);
 
     // Call Azure OpenAI API with vision capabilities
     const response = await client.chat.completions.create({
@@ -150,7 +256,7 @@ export async function analyzeFrame(
           content: [
             {
               type: 'text',
-              text: `${VISION_MODEL_PROMPT}${sequenceNote}${priorNote}\n\nAnalyze the image and respond with ONLY the JSON object, no other text.`,
+              text: `${VISION_MODEL_PROMPT}${sequenceNote}${priorNote}${changeNote}\n\nAnalyze the image and respond with ONLY the JSON object, no other text.`,
             },
             {
               type: 'image_url',
@@ -167,6 +273,12 @@ export async function analyzeFrame(
       response_format: { type: 'json_object' },
     });
 
+    // Update telemetry with token usage
+    telemetry.promptTokens = response.usage?.prompt_tokens ?? 0;
+    telemetry.completionTokens = response.usage?.completion_tokens ?? 0;
+    telemetry.totalTokens = response.usage?.total_tokens ?? 0;
+    telemetry.inferenceMs = Date.now() - startTime;
+
     const content = response.choices[0]?.message?.content;
 
     if (!content) {
@@ -174,13 +286,13 @@ export async function analyzeFrame(
     }
 
     console.log(`[Vision] Raw response length: ${content.length} characters`);
-    console.log(`[Vision] Token usage: ${response.usage?.total_tokens} total (${response.usage?.prompt_tokens} prompt, ${response.usage?.completion_tokens} completion)`);
+    console.log(`[Vision] Token usage: ${telemetry.totalTokens} total (${telemetry.promptTokens} prompt, ${telemetry.completionTokens} completion)`);
 
     // Parse and validate JSON response
     const parsed = JSON.parse(content);
     const validated = visionAnalysisResponseSchema.safeParse(parsed);
     if (validated.success) {
-      return validated.data;
+      return { analysis: validated.data, telemetry };
     }
 
     console.warn('[Vision] Schema validation failed, attempting normalization:', validated.error.issues);
@@ -188,7 +300,8 @@ export async function analyzeFrame(
     const normalizedValidation = visionAnalysisResponseSchema.safeParse(normalized);
     if (normalizedValidation.success) {
       console.warn('[Vision] Normalized analysis accepted');
-      return normalizedValidation.data;
+      telemetry.schemaNormalized = true;
+      return { analysis: normalizedValidation.data, telemetry };
     }
 
     console.error('[Vision] Normalized analysis still invalid:', normalizedValidation.error.issues);
@@ -200,34 +313,263 @@ export async function analyzeFrame(
       console.error('[Vision] Error stack:', error.stack);
     }
 
+    // Update telemetry for error case
+    telemetry.inferenceMs = Date.now() - startTime;
+    telemetry.truncationReason = 'error';
+
     // Return default scores if analysis fails
     return {
-      rubric_scores: {
-        cat1: 1,
-        cat2: 1,
-        cat3: 1,
-        cat4: 1,
-        cat5: 1,
-        cat6: 1,
-        cat7: 1,
-      },
-      justifications: {
-        cat1: 'Analysis failed',
-        cat2: 'Analysis failed',
-        cat3: 'Analysis failed',
-        cat4: 'Analysis failed',
-        cat5: 'Analysis failed',
-        cat6: 'Analysis failed',
-        cat7: 'Analysis failed',
-      },
-      issue_tags: [],
-      suggestions: [
-        {
-          severity: 'med' as const,
-          title: 'Analysis Error',
-          description: 'Frame analysis failed. Please review manually.',
+      analysis: {
+        rubric_scores: {
+          cat1: 1,
+          cat2: 1,
+          cat3: 1,
+          cat4: 1,
+          cat5: 1,
+          cat6: 1,
+          cat7: 1,
         },
-      ],
+        justifications: {
+          cat1: 'Analysis failed',
+          cat2: 'Analysis failed',
+          cat3: 'Analysis failed',
+          cat4: 'Analysis failed',
+          cat5: 'Analysis failed',
+          cat6: 'Analysis failed',
+          cat7: 'Analysis failed',
+        },
+        issue_tags: [],
+        suggestions: [
+          {
+            severity: 'med' as const,
+            title: 'Analysis Error',
+            description: 'Frame analysis failed. Please review manually.',
+          },
+        ],
+      },
+      telemetry,
     };
   }
+}
+
+// =============================================================================
+// V3 Multi-Image Analysis (Day 3-4)
+// =============================================================================
+
+export interface MultiImageAnalysisContext {
+  /** Temporal window metadata */
+  temporalMetadata: TemporalWindowMetadata;
+  /** Prior context trail (short summaries of previous analyses) */
+  priorContextTrail?: string;
+  /** Change context from preprocessing */
+  changeContext?: FrameChangeContext;
+  /** Preprocessing diagnostics */
+  diagnostics?: PreprocessingDiagnostics;
+  /** Keyframe index in overall sequence */
+  keyframeIndex: number;
+}
+
+/**
+ * V3 Multi-Image Analysis
+ * Accepts multiple images: raw strip, diff heatmap strip, change crop
+ */
+export async function analyzeFrameV3(
+  rawStrip: Buffer,
+  diffHeatmapStrip: Buffer | undefined,
+  changeCrop: Buffer | undefined,
+  context: MultiImageAnalysisContext,
+  engineVersion: AnalysisEngineVersion = ANALYSIS_ENGINE_VERSIONS.V3_HYBRID
+): Promise<AnalyzeFrameResult> {
+  const startTime = Date.now();
+  const telemetry = createEmptyFrameTelemetry(engineVersion);
+  const preprocessingConfig = getPreprocessingConfig();
+
+  // Build image content array
+  const imageContents: Array<{
+    type: 'image_url';
+    image_url: { url: string; detail: 'high' | 'low' };
+  }> = [];
+
+  // 1. Raw temporal strip (always included)
+  const rawBase64 = rawStrip.toString('base64');
+  imageContents.push({
+    type: 'image_url',
+    image_url: {
+      url: `data:image/jpeg;base64,${rawBase64}`,
+      detail: 'high',
+    },
+  });
+
+  // 2. Diff heatmap strip (if available)
+  if (diffHeatmapStrip) {
+    const heatmapBase64 = diffHeatmapStrip.toString('base64');
+    imageContents.push({
+      type: 'image_url',
+      image_url: {
+        url: `data:image/jpeg;base64,${heatmapBase64}`,
+        detail: 'low', // Lower detail for heatmap
+      },
+    });
+  }
+
+  // 3. Change crop (if available)
+  if (changeCrop) {
+    const cropBase64 = changeCrop.toString('base64');
+    imageContents.push({
+      type: 'image_url',
+      image_url: {
+        url: `data:image/jpeg;base64,${cropBase64}`,
+        detail: 'high',
+      },
+    });
+  }
+
+  // Build structured metadata note
+  const metadataNote = buildMetadataNote(context, diffHeatmapStrip !== undefined, changeCrop !== undefined);
+
+  // Build change context note
+  const changeNote = preprocessingConfig.includeChangeContext && context.changeContext
+    ? formatChangeContextForPrompt(context.changeContext)
+    : '';
+
+  // Build prior context note
+  const priorNote = context.priorContextTrail
+    ? `\n\nContext from previous frames (carry this forward when judging the current frame):\n${context.priorContextTrail}`
+    : '';
+
+  try {
+    console.log(`[Vision V3] Analyzing frame ${context.keyframeIndex} with ${imageContents.length} images (engine: ${engineVersion})`);
+    if (context.diagnostics?.preprocessFallback) {
+      console.warn(`[Vision V3] Using fallback mode: ${context.diagnostics.fallbackReason}`);
+    }
+
+    // Call Azure OpenAI API with multi-image payload
+    const response = await client.chat.completions.create({
+      model: AZURE_OPENAI_DEPLOYMENT,
+      messages: [
+        {
+          role: 'system',
+          content: 'You are a UX interaction-flow evaluator. Analyze the provided screenshot(s) and respond with ONLY valid JSON, no other text.',
+        },
+        {
+          role: 'user',
+          content: [
+            {
+              type: 'text',
+              text: `${VISION_MODEL_PROMPT}${metadataNote}${priorNote}${changeNote}\n\nAnalyze the images and respond with ONLY the JSON object, no other text.`,
+            },
+            ...imageContents,
+          ],
+        },
+      ],
+      max_tokens: 2000,
+      temperature: 0.3,
+      response_format: { type: 'json_object' },
+    });
+
+    // Update telemetry with token usage
+    telemetry.promptTokens = response.usage?.prompt_tokens ?? 0;
+    telemetry.completionTokens = response.usage?.completion_tokens ?? 0;
+    telemetry.totalTokens = response.usage?.total_tokens ?? 0;
+    telemetry.inferenceMs = Date.now() - startTime;
+
+    const content = response.choices[0]?.message?.content;
+
+    if (!content) {
+      throw new Error('No response from Azure OpenAI');
+    }
+
+    console.log(`[Vision V3] Raw response length: ${content.length} characters`);
+    console.log(`[Vision V3] Token usage: ${telemetry.totalTokens} total (${telemetry.promptTokens} prompt, ${telemetry.completionTokens} completion)`);
+
+    // Parse and validate JSON response
+    const parsed = JSON.parse(content);
+    const validated = visionAnalysisResponseSchema.safeParse(parsed);
+    if (validated.success) {
+      return { analysis: validated.data, telemetry };
+    }
+
+    console.warn('[Vision V3] Schema validation failed, attempting normalization:', validated.error.issues);
+    const normalized = normalizeAnalysis(parsed);
+    const normalizedValidation = visionAnalysisResponseSchema.safeParse(normalized);
+    if (normalizedValidation.success) {
+      console.warn('[Vision V3] Normalized analysis accepted');
+      telemetry.schemaNormalized = true;
+      return { analysis: normalizedValidation.data, telemetry };
+    }
+
+    console.error('[Vision V3] Normalized analysis still invalid:', normalizedValidation.error.issues);
+    throw new Error('Vision response did not match schema');
+  } catch (error) {
+    console.error('[Vision V3] Analysis error:', error);
+    if (error instanceof Error) {
+      console.error('[Vision V3] Error message:', error.message);
+    }
+
+    telemetry.inferenceMs = Date.now() - startTime;
+    telemetry.truncationReason = 'error';
+
+    return {
+      analysis: {
+        rubric_scores: { cat1: 1, cat2: 1, cat3: 1, cat4: 1, cat5: 1, cat6: 1, cat7: 1 },
+        justifications: {
+          cat1: 'Analysis failed',
+          cat2: 'Analysis failed',
+          cat3: 'Analysis failed',
+          cat4: 'Analysis failed',
+          cat5: 'Analysis failed',
+          cat6: 'Analysis failed',
+          cat7: 'Analysis failed',
+        },
+        issue_tags: [],
+        suggestions: [{ severity: 'med' as const, title: 'Analysis Error', description: 'Frame analysis failed. Please review manually.' }],
+      },
+      telemetry,
+    };
+  }
+}
+
+/**
+ * Build structured metadata note for V3 prompt
+ */
+function buildMetadataNote(
+  context: MultiImageAnalysisContext,
+  hasDiffHeatmap: boolean,
+  hasChangeCrop: boolean
+): string {
+  const { temporalMetadata, keyframeIndex, diagnostics } = context;
+  const parts: string[] = [];
+
+  // Image descriptions
+  const imageDescriptions: string[] = ['Image 1: Temporal strip showing consecutive frames (left=oldest, right=newest)'];
+  if (hasDiffHeatmap) {
+    imageDescriptions.push('Image 2: Diff heatmap showing change intensity between consecutive frames (red=high change)');
+  }
+  if (hasChangeCrop) {
+    imageDescriptions.push(`Image ${hasDiffHeatmap ? 3 : 2}: Cropped region showing the area of maximum change`);
+  }
+
+  parts.push(`\n\n[IMAGE LAYOUT]\n${imageDescriptions.join('\n')}`);
+
+  // Temporal metadata
+  parts.push(`\n\n[TEMPORAL METADATA]`);
+  parts.push(`- Keyframe index: ${keyframeIndex}`);
+  parts.push(`- Window positions: [${temporalMetadata.relativeIndices.join(', ')}] relative to keyframe (0)`);
+  parts.push(`- Timestamps (ms): [${temporalMetadata.timestamps.join(', ')}]`);
+  if (temporalMetadata.deltaMs.length > 0) {
+    parts.push(`- Delta between frames (ms): [${temporalMetadata.deltaMs.join(', ')}]`);
+  }
+
+  // Preprocessing diagnostics
+  if (diagnostics) {
+    if (diagnostics.preprocessFallback) {
+      parts.push(`\n[NOTE: Preprocessing fallback active - ${diagnostics.fallbackReason}. Some visual aids may be missing.]`);
+    }
+    if (diagnostics.ssimScores && diagnostics.ssimScores.length > 0) {
+      const avgSsim = diagnostics.ssimScores.reduce((a, b) => a + b, 0) / diagnostics.ssimScores.length;
+      parts.push(`- SSIM between consecutive frames: [${diagnostics.ssimScores.map(s => s.toFixed(3)).join(', ')}] (avg: ${avgSsim.toFixed(3)})`);
+    }
+  }
+
+  return parts.join('\n');
 }

@@ -4,6 +4,8 @@ import {
   getPreviousCompletedRunSummaryByTitle,
   getRunByIdAndUser,
   getRunSummary,
+  getShadowSummary,
+  computeShadowDiffFromSummaries,
   updateRun,
 } from '@/lib/azure/db';
 import { deleteBlob, deleteBlobsInFolder, generateDownloadSasUrl } from '@/lib/azure/storage';
@@ -53,6 +55,11 @@ export async function GET(
       }))
     );
 
+    // Generate video URL for the VideoTimeline component (60 min expiry for longer viewing)
+    const videoUrl = run.video_storage_path
+      ? await generateDownloadSasUrl(run.video_storage_path, 60)
+      : null;
+
     const regression =
       summary && previousSummary
         ? {
@@ -62,11 +69,29 @@ export async function GET(
           }
         : null;
 
+    // V3: Get shadow summary and compute diff
+    let shadowSummary = null;
+    let shadowDiff = null;
+    if (summary) {
+      try {
+        shadowSummary = await getShadowSummary(runId);
+        if (shadowSummary) {
+          shadowDiff = computeShadowDiffFromSummaries(summary, shadowSummary);
+        }
+      } catch {
+        // Shadow table may not exist yet, ignore errors
+      }
+    }
+
     return NextResponse.json({
       run,
       summary,
       keyframes: framesWithUrls,
+      videoUrl,
       regression,
+      // V3 fields
+      shadow_summary: shadowSummary,
+      shadow_diff: shadowDiff,
     });
   } catch (error) {
     if (error instanceof UnauthorizedError) {

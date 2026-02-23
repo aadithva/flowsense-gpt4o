@@ -1,4 +1,4 @@
-# FlowSense Backend Processor - Azure Container Apps
+# FlowSense Backend Processor
 FROM node:20-slim
 
 # Install ffmpeg and curl for health checks
@@ -30,9 +30,9 @@ RUN mkdir -p /app/backend/temp
 # Expose processor port
 EXPOSE 3002
 
-# Health check for Azure Container Apps
+# Health check (uses PORT env var, defaults to 3002)
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-  CMD curl -f http://localhost:3002/health || exit 1
+  CMD curl -f http://localhost:${PORT:-3002}/health || exit 1
 
 # Start the processor
 CMD ["npm", "start", "--workspace=@interactive-flow/processor"]
