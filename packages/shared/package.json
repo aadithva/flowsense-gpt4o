@@ -14,8 +14,8 @@
     }
   },
   "scripts": {
-    "build": "tsc",
-    "typecheck": "tsc --noEmit",
+    "build": "npx tsc",
+    "typecheck": "npx tsc --noEmit",
     "test": "vitest run --passWithNoTests",
     "dev": "tsc --watch",
     "clean": "rm -rf dist"
